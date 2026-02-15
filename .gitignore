@@ -13,6 +13,10 @@ stats.html
 stats-*.json
 .wxt
 web-ext.config.ts
+playwright-report
+test-results
+.env
+.env.*
 
 # Editor directories and files
 .vscode/*
