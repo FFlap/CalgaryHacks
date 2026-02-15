@@ -47,15 +47,6 @@ function issueLabel(issue: IssueType): string {
   return 'Bias';
 }
 
-function stateLabel(state: ScanStatus['state']): string {
-  if (state === 'extracting') return 'Extracting';
-  if (state === 'analyzing') return 'Analyzing';
-  if (state === 'highlighting') return 'Highlighting';
-  if (state === 'done') return 'Complete';
-  if (state === 'error') return 'Error';
-  return 'Ready';
-}
-
 function formatQuoteForDisplay(input: string): string {
   const cleaned = input
     .replace(/\s+/g, ' ')
@@ -136,72 +127,94 @@ function installStyles() {
   style.id = STYLE_ID;
   style.textContent = `
     #${PANEL_ID} {
+      --cred-bg: #faf6f0;
+      --cred-card: #fffcf8;
+      --cred-foreground: #2d2520;
+      --cred-muted: #8f7f71;
+      --cred-primary: #af6d3a;
+      --cred-primary-foreground: #fff7ef;
+      --cred-border: #e8dbcf;
+      --cred-accent: #f8efe6;
+      --cred-ring: #ba855e;
+      --cred-danger: #b84a3b;
       position: sticky;
       top: 12px;
       z-index: 20;
       order: -999;
       display: block;
       width: 100%;
-      border: 1px solid rgba(35, 35, 35, 0.16);
-      border-radius: 16px;
-      background:
-        linear-gradient(165deg, rgba(255, 255, 255, 0.98), rgba(247, 246, 242, 0.95));
-      box-shadow: 0 10px 24px rgba(15, 15, 15, 0.08);
+      border: 1px solid var(--cred-border);
+      border-radius: 12px;
+      background: var(--cred-bg);
+      box-shadow: 0 10px 20px rgba(61, 47, 36, 0.1);
       overflow: hidden;
-      font-family: "YouTube Sans", "Avenir Next", "Trebuchet MS", sans-serif;
+      color: var(--cred-foreground);
+      font-family: "DM Sans", sans-serif;
       margin-bottom: 12px;
+    }
+    #${PANEL_ID} * {
+      box-sizing: border-box;
+      font-family: inherit;
     }
     #${PANEL_ID} .cred-panel-header {
       display: flex;
       align-items: center;
       justify-content: space-between;
-      padding: 12px 12px 8px;
-      border-bottom: 1px solid rgba(35, 35, 35, 0.12);
-      background: linear-gradient(120deg, rgba(20, 36, 68, 0.06), rgba(203, 88, 36, 0.06));
+      gap: 10px;
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--cred-border);
+      background: var(--cred-card);
     }
     #${PANEL_ID} .cred-title {
       margin: 0;
-      font-size: 13px;
-      letter-spacing: 0.06em;
-      text-transform: uppercase;
+      font-size: 10px;
+      letter-spacing: 0;
+      text-transform: none;
       font-weight: 700;
-      color: #152547;
+      color: var(--cred-muted);
     }
     #${PANEL_ID} .cred-status {
       margin: 2px 0 0;
-      font-size: 12px;
-      color: #4f5662;
+      font-size: 11px;
+      color: var(--cred-foreground);
+      line-height: 1.35;
     }
     #${PANEL_ID} .cred-loading-inline {
       display: inline-flex;
       align-items: center;
       gap: 6px;
-      font-size: 11px;
-      color: #425469;
+      margin-top: 4px;
+      font-size: 10px;
+      color: var(--cred-muted);
       font-weight: 600;
     }
     #${PANEL_ID} .cred-spinner {
       width: 12px;
       height: 12px;
       border-radius: 999px;
-      border: 2px solid rgba(31, 66, 123, .25);
-      border-top-color: rgba(31, 66, 123, .88);
+      border: 2px solid rgba(175, 109, 58, 0.24);
+      border-top-color: var(--cred-primary);
       animation: cred-spin .75s linear infinite;
       flex: 0 0 auto;
     }
     #${PANEL_ID} .cred-scan-btn {
-      border: 0;
-      border-radius: 999px;
-      background: #7e4c2f;
-      color: #fff;
-      padding: 8px 12px;
-      font-size: 12px;
+      border: 1px solid var(--cred-primary);
+      border-radius: 8px;
+      background: var(--cred-primary);
+      color: var(--cred-primary-foreground);
+      padding: 6px 11px;
+      font-size: 10px;
       font-weight: 700;
+      letter-spacing: 0.02em;
+      line-height: 1.2;
       cursor: pointer;
-      transition: filter .15s ease;
+      transition: filter .15s ease, transform .15s ease;
     }
-    #${PANEL_ID} .cred-scan-btn:hover { filter: brightness(1.08); }
-    #${PANEL_ID} .cred-scan-btn:disabled { opacity: .55; cursor: default; }
+    #${PANEL_ID} .cred-scan-btn:hover {
+      filter: brightness(1.04);
+      transform: translateY(-1px);
+    }
+    #${PANEL_ID} .cred-scan-btn:disabled { opacity: .58; cursor: default; transform: none; }
     #${PANEL_ID} .cred-panel-body {
       display: grid;
       grid-template-columns: 1fr;
@@ -210,90 +223,137 @@ function installStyles() {
       max-height: min(70vh, 760px);
       overflow: auto;
     }
+    #${PANEL_ID} .cred-panel-body::-webkit-scrollbar,
+    #${PANEL_ID} .cred-transcript::-webkit-scrollbar {
+      width: 4px;
+      height: 4px;
+    }
+    #${PANEL_ID} .cred-panel-body::-webkit-scrollbar-thumb,
+    #${PANEL_ID} .cred-transcript::-webkit-scrollbar-thumb {
+      border-radius: 999px;
+      background: #ccb8a5;
+    }
     #${PANEL_ID} .cred-filter-row {
       display: flex;
-      gap: 6px;
+      gap: 4px;
       flex-wrap: wrap;
     }
     #${PANEL_ID} .cred-chip {
-      border: 1px solid rgba(24, 24, 24, .2);
+      border: 1px solid var(--cred-border);
       border-radius: 999px;
-      background: #fff;
-      color: #2f3340;
-      padding: 3px 8px;
-      font-size: 11px;
+      background: transparent;
+      color: var(--cred-muted);
+      padding: 4px 9px;
+      font-size: 10px;
+      font-weight: 600;
+      line-height: 1.2;
       cursor: pointer;
     }
     #${PANEL_ID} .cred-chip[data-active="true"] {
-      background: #1d3b66;
-      color: #fff;
-      border-color: #1d3b66;
+      background: var(--cred-primary);
+      color: var(--cred-primary-foreground);
+      border-color: transparent;
+    }
+    #${PANEL_ID} .cred-chip:focus-visible,
+    #${PANEL_ID} .cred-scan-btn:focus-visible,
+    #${PANEL_ID} .cred-ts-btn:focus-visible,
+    #${PANEL_ID} .cred-row-time:focus-visible {
+      outline: 2px solid color-mix(in srgb, var(--cred-ring) 60%, transparent);
+      outline-offset: 2px;
     }
     #${PANEL_ID} .cred-section-label {
-      font-size: 10px;
-      letter-spacing: 0.12em;
+      font-size: 8.5px;
+      letter-spacing: 0.14em;
       text-transform: uppercase;
-      color: #6a7482;
+      color: var(--cred-muted);
       margin: 0 0 4px;
       font-weight: 700;
     }
     #${PANEL_ID} .cred-findings {
       display: grid;
-      gap: 6px;
+      gap: 8px;
     }
     #${PANEL_ID} .cred-finding {
-      border: 1px solid rgba(20, 20, 20, .14);
-      border-radius: 12px;
-      padding: 8px;
-      background: #fff;
+      border: 1px solid var(--cred-border);
+      border-radius: 10px;
+      padding: 9px;
+      background: var(--cred-card);
       display: grid;
-      gap: 5px;
+      gap: 6px;
     }
     #${PANEL_ID} .cred-finding-tags {
       display: flex;
-      gap: 4px;
+      gap: 5px;
       flex-wrap: wrap;
       align-items: center;
     }
     #${PANEL_ID} .cred-tag {
-      border-radius: 999px;
-      font-size: 10px;
-      padding: 2px 7px;
-      border: 1px solid rgba(40, 40, 40, .15);
-      background: #f8f8f8;
-      color: #303744;
+      border: 1px solid;
+      border-radius: 6px;
+      font-size: 9px;
       font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      padding: 2px 7px;
+      white-space: nowrap;
+      line-height: 1;
+    }
+    #${PANEL_ID} .cred-tag--misinformation {
+      background: rgba(186, 60, 47, 0.08);
+      border-color: rgba(186, 60, 47, 0.24);
+      color: #ba3c2f;
+    }
+    #${PANEL_ID} .cred-tag--fallacy {
+      background: rgba(182, 119, 33, 0.08);
+      border-color: rgba(182, 119, 33, 0.24);
+      color: #b67721;
+    }
+    #${PANEL_ID} .cred-tag--bias {
+      background: rgba(53, 108, 158, 0.08);
+      border-color: rgba(53, 108, 158, 0.24);
+      color: #356c9e;
+    }
+    #${PANEL_ID} .cred-tag--meta {
+      background: transparent;
+      border-color: var(--cred-border);
+      color: var(--cred-muted);
+      letter-spacing: 0;
+      text-transform: none;
+      font-weight: 600;
     }
     #${PANEL_ID} .cred-quote {
       margin: 0;
-      font-size: 12px;
-      color: #1c2430;
-      line-height: 1.35;
+      font-size: 12.5px;
+      color: rgba(45, 37, 32, 0.85);
+      line-height: 1.45;
     }
     #${PANEL_ID} .cred-rationale {
       margin: 0;
       font-size: 11px;
-      color: #5b6472;
-      line-height: 1.35;
+      color: rgba(45, 37, 32, 0.72);
+      line-height: 1.45;
     }
     #${PANEL_ID} .cred-ts-btn {
       justify-self: start;
-      border: 1px solid rgba(20, 60, 130, .25);
-      border-radius: 999px;
-      background: #eef4ff;
-      color: #153f7a;
-      font-size: 11px;
-      font-weight: 700;
-      padding: 3px 8px;
+      border: 1px solid var(--cred-primary);
+      border-radius: 6px;
+      background: transparent;
+      color: var(--cred-primary);
+      font-size: 10px;
+      font-weight: 600;
+      padding: 5px 10px;
       cursor: pointer;
+    }
+    #${PANEL_ID} .cred-ts-btn:hover {
+      filter: brightness(0.92);
     }
     #${PANEL_ID} .cred-transcript {
       display: grid;
-      gap: 5px;
-      border: 1px solid rgba(20, 20, 20, .13);
-      border-radius: 12px;
+      gap: 6px;
+      border: 1px solid var(--cred-border);
+      border-radius: 10px;
       padding: 8px;
-      background: #fcfcfa;
+      background: #f7f0e7;
       max-height: 320px;
       overflow: auto;
     }
@@ -302,55 +362,60 @@ function installStyles() {
       grid-template-columns: auto 1fr;
       gap: 8px;
       border-radius: 8px;
-      padding: 4px 5px;
+      padding: 5px 6px;
       align-items: start;
+      border: 1px solid transparent;
+      transition: background .12s ease;
     }
     #${PANEL_ID} .cred-row[data-flagged="true"] {
-      background: linear-gradient(90deg, rgba(194, 232, 255, .35), rgba(255, 225, 205, .35));
+      background: rgba(175, 109, 58, 0.08);
     }
     #${PANEL_ID} .cred-row[data-current="true"] {
-      background: linear-gradient(90deg, rgba(154, 228, 255, .45), rgba(198, 219, 255, .42));
-      box-shadow: inset 0 0 0 1px rgba(34, 91, 181, .35);
+      background: rgba(175, 109, 58, 0.16);
+      border-color: rgba(175, 109, 58, 0.34);
     }
     #${PANEL_ID} .cred-row[data-current="true"] .cred-row-time {
-      background: #173f78;
+      background: #8f5730;
     }
     #${PANEL_ID} .cred-row .cred-row-time {
       border: 0;
       border-radius: 999px;
-      background: #202b40;
-      color: #fff;
+      background: var(--cred-primary);
+      color: var(--cred-primary-foreground);
       font-size: 10px;
       font-weight: 700;
       padding: 2px 7px;
       cursor: pointer;
       line-height: 1.2;
     }
+    #${PANEL_ID} .cred-row .cred-row-time:hover {
+      filter: brightness(1.04);
+    }
     #${PANEL_ID} .cred-row-text {
       margin: 0;
       font-size: 11px;
       line-height: 1.35;
-      color: #222a37;
+      color: rgba(45, 37, 32, 0.84);
       cursor: pointer;
       border-radius: 6px;
       padding: 2px 4px;
       transition: background .12s ease;
     }
     #${PANEL_ID} .cred-row-text:hover {
-      background: rgba(23, 63, 120, .08);
+      background: rgba(175, 109, 58, 0.1);
     }
     #${PANEL_ID} .cred-empty {
-      font-size: 12px;
-      color: #546071;
+      font-size: 11.5px;
+      color: var(--cred-muted);
       margin: 0;
     }
     #${PANEL_ID} .cred-error {
-      border: 1px solid rgba(161, 45, 45, .34);
-      background: rgba(255, 235, 235, .7);
-      color: #842b2b;
-      border-radius: 10px;
+      border: 1px solid rgba(184, 74, 59, 0.34);
+      background: rgba(255, 249, 247, 0.9);
+      color: var(--cred-danger);
+      border-radius: 8px;
       padding: 8px;
-      font-size: 12px;
+      font-size: 11px;
     }
     @keyframes cred-spin {
       from { transform: rotate(0deg); }
@@ -613,12 +678,18 @@ export default defineContentScript({
       const titleWrap = document.createElement('div');
       const title = document.createElement('p');
       title.className = 'cred-title';
-      title.textContent = 'Bias Timeline Scan';
+      title.textContent = 'Clarity';
       const statusLine = document.createElement('p');
       statusLine.className = 'cred-status';
       statusLine.setAttribute('data-testid', 'yt-panel-status');
-      statusLine.textContent = `${stateLabel(status.state)} - ${status.message}`;
-      titleWrap.append(title, statusLine);
+      const shouldShowStatusLine =
+        !(status.state === 'idle' && status.message.toLowerCase().includes('ready'));
+      if (shouldShowStatusLine) {
+        statusLine.textContent = status.message;
+        titleWrap.append(title, statusLine);
+      } else {
+        titleWrap.append(title);
+      }
 
       if (showLoadingIndicator) {
         const loadingInline = document.createElement('span');
@@ -694,13 +765,13 @@ export default defineContentScript({
           tags.className = 'cred-finding-tags';
           for (const issue of finding.issueTypes) {
             const tag = document.createElement('span');
-            tag.className = 'cred-tag';
+            tag.className = `cred-tag cred-tag--${issue}`;
             tag.textContent = issueLabel(issue);
             tags.appendChild(tag);
           }
           if (finding.timestampLabel) {
             const tsTag = document.createElement('span');
-            tsTag.className = 'cred-tag';
+            tsTag.className = 'cred-tag cred-tag--meta';
             tsTag.textContent = finding.timestampLabel;
             tags.appendChild(tsTag);
           }
@@ -732,7 +803,7 @@ export default defineContentScript({
 
       const transcriptLabel = document.createElement('p');
       transcriptLabel.className = 'cred-section-label';
-      transcriptLabel.textContent = `Transcript${transcriptSource ? ` (${transcriptSource})` : ''}`;
+      transcriptLabel.textContent = 'Transcript';
       body.appendChild(transcriptLabel);
 
       if (showLoadingIndicator) {

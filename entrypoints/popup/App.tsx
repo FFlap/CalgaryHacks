@@ -1295,7 +1295,7 @@ function App() {
                 <p className="screen13-status">Website analysis</p>
                 <h2 className="screen13-headline">Scanning claims and building findings...</h2>
               </div>
-              <LoaderCircle className="screen13-spinner" />
+              <span className="screen13-ring" aria-hidden />
             </div>
 
             <div className="screen13-meter-row">
