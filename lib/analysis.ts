@@ -33,9 +33,54 @@ const BIAS_SUBTYPES = new Set([
 ]);
 
 const ALLOWED_ISSUE_TYPES = new Set<IssueType>(['misinformation', 'fallacy', 'bias']);
+const HTML_ENTITY_MAP: Record<string, string> = {
+  '&amp;': '&',
+  '&lt;': '<',
+  '&gt;': '>',
+  '&quot;': '"',
+  '&apos;': "'",
+  '&#39;': "'",
+};
 
 function normalizeText(input: string): string {
   return input.toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+function decodeHtmlEntities(input: string): string {
+  let value = input;
+  for (let round = 0; round < 3; round += 1) {
+    const next = value
+      .replace(/&(amp|lt|gt|quot|apos|#39);/gi, (entity) => HTML_ENTITY_MAP[entity.toLowerCase()] ?? entity)
+      .replace(/&#(\d+);/g, (_, codeText) => {
+        const code = Number(codeText);
+        if (!Number.isFinite(code)) return _;
+        try {
+          return String.fromCodePoint(code);
+        } catch {
+          return _;
+        }
+      });
+    if (next === value) break;
+    value = next;
+  }
+  return value;
+}
+
+function stripWrappingQuotes(input: string): string {
+  let value = input.trim();
+  for (let i = 0; i < 2; i += 1) {
+    const next = value
+      .replace(/^[\s"'`“”‘’]+/, '')
+      .replace(/[\s"'`“”‘’]+$/, '')
+      .trim();
+    if (next === value) break;
+    value = next;
+  }
+  return value;
+}
+
+function normalizeQuoteText(input: string): string {
+  return stripWrappingQuotes(decodeHtmlEntities(input).replace(/\s+/g, ' '));
 }
 
 function normalizeSubtype(input?: string): string {
@@ -259,7 +304,7 @@ function coerceCandidates(payload: unknown): CandidateClaim[] {
     if (!item || typeof item !== 'object') {
       continue;
     }
-    const quote = String((item as { quote?: unknown }).quote ?? '').trim();
+    const quote = normalizeQuoteText(String((item as { quote?: unknown }).quote ?? ''));
     if (quote.length < 18) {
       continue;
     }
@@ -296,7 +341,7 @@ function coerceRawFindings(payload: unknown): RawFinding[] {
     if (!item || typeof item !== 'object') {
       continue;
     }
-    const quote = String((item as { quote?: unknown }).quote ?? '').trim();
+    const quote = normalizeQuoteText(String((item as { quote?: unknown }).quote ?? ''));
     const issueTypes = toIssueTypes((item as { issueTypes?: unknown }).issueTypes);
     if (!quote || issueTypes.length === 0) {
       continue;

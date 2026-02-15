@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ChevronDown,
   Gauge,
@@ -39,9 +39,10 @@ import type {
 const ext = ((globalThis as any).browser ?? (globalThis as any).chrome) as typeof browser;
 const API_KEY_STORAGE_KEY = 'openrouter_api_key';
 const LEGACY_API_KEY_STORAGE_KEY = 'gemini_api_key';
+const GOOGLE_FACT_CHECK_API_KEY_STORAGE_KEY = 'google_fact_check_api_key';
 
 type ReportResponse = { report: ScanReport | null };
-type SettingsResponse = { hasApiKey: boolean };
+type SettingsResponse = { hasApiKey: boolean; hasGoogleFactCheckApiKey?: boolean };
 type FocusResponse = { findingId: string | null };
 type EvidenceResponse = {
   ok: boolean;
@@ -74,7 +75,7 @@ async function sendMessage<T>(message: RuntimeRequest): Promise<T> {
   }
 
   if (message.type === 'GET_SETTINGS') {
-    return { hasApiKey: false } as T;
+    return { hasApiKey: false, hasGoogleFactCheckApiKey: false } as T;
   }
 
   if (message.type === 'GET_SCAN_STATUS') {
@@ -194,6 +195,16 @@ function stateLabel(state: ScanStatus['state']) {
   return 'Ready';
 }
 
+function formatQuoteForDisplay(input: string): string {
+  const cleaned = input
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/^[\s"'`“”‘’]+/, '')
+    .replace(/[\s"'`“”‘’]+$/, '')
+    .trim();
+  return cleaned ? `"${cleaned}"` : '""';
+}
+
 function sortFindingsForDisplay(findings: Finding[], timelineMode: boolean): Finding[] {
   if (!timelineMode) return findings;
 
@@ -297,23 +308,25 @@ function StepProgressRing({
 
 function SettingsModal({
   hasApiKey,
+  hasGoogleFactCheckApiKey,
   onSaved,
 }: {
   hasApiKey: boolean;
-  onSaved: () => void;
+  hasGoogleFactCheckApiKey: boolean;
+  onSaved: (updates: { openRouter?: boolean; googleFactCheck?: boolean }) => void;
 }) {
   const [apiKey, setApiKey] = useState('');
-  const [isSaving, setIsSaving] = useState(false);
+  const [googleFactCheckApiKey, setGoogleFactCheckApiKey] = useState('');
+  const [isSavingOpenRouter, setIsSavingOpenRouter] = useState(false);
+  const [isSavingGoogleFactCheck, setIsSavingGoogleFactCheck] = useState(false);
   const [message, setMessage] = useState('');
-  const inputRef = useRef<HTMLInputElement>(null);
-
-  const save = useCallback(async () => {
+  const saveOpenRouterKey = useCallback(async () => {
     if (!apiKey.trim()) {
-      setMessage('Please enter a valid API key.');
+      setMessage('Please enter a valid OpenRouter API key.');
       return;
     }
 
-    setIsSaving(true);
+    setIsSavingOpenRouter(true);
     try {
       const trimmed = apiKey.trim();
       await ext.storage.local.set({
@@ -324,15 +337,41 @@ function SettingsModal({
         type: 'SAVE_API_KEY',
         apiKey: trimmed,
       }).catch(() => undefined);
-      setMessage('Saved successfully.');
+      setMessage('OpenRouter API key saved.');
       setApiKey('');
-      onSaved();
+      onSaved({ openRouter: true });
     } catch (error) {
       setMessage(error instanceof Error ? error.message : 'Failed to save.');
     } finally {
-      setIsSaving(false);
+      setIsSavingOpenRouter(false);
     }
   }, [apiKey, onSaved]);
+
+  const saveGoogleFactCheckKey = useCallback(async () => {
+    if (!googleFactCheckApiKey.trim()) {
+      setMessage('Please enter a valid Google Fact Check API key.');
+      return;
+    }
+
+    setIsSavingGoogleFactCheck(true);
+    try {
+      const trimmed = googleFactCheckApiKey.trim();
+      await ext.storage.local.set({
+        [GOOGLE_FACT_CHECK_API_KEY_STORAGE_KEY]: trimmed,
+      });
+      await sendMessage<{ ok: boolean; hasGoogleFactCheckApiKey: boolean }>({
+        type: 'SAVE_GOOGLE_FACT_CHECK_API_KEY',
+        apiKey: trimmed,
+      }).catch(() => undefined);
+      setMessage('Google Fact Check API key saved.');
+      setGoogleFactCheckApiKey('');
+      onSaved({ googleFactCheck: true });
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : 'Failed to save.');
+    } finally {
+      setIsSavingGoogleFactCheck(false);
+    }
+  }, [googleFactCheckApiKey, onSaved]);
 
   return (
     <Dialog>
@@ -348,46 +387,90 @@ function SettingsModal({
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <KeyRound className="size-4 text-muted-foreground" />
-            OpenRouter API Key
+            API Keys
           </DialogTitle>
           <DialogDescription>
             Stored locally in your browser. Never leaves this device.
           </DialogDescription>
         </DialogHeader>
 
-        {hasApiKey && (
-          <div className="mb-3 flex items-center gap-2 rounded-lg bg-emerald-50/80 px-3 py-2 text-xs text-emerald-700 border border-emerald-200/60">
-            <ShieldCheck className="size-3.5 shrink-0" />
-            API key is configured and active.
+        {(hasApiKey || hasGoogleFactCheckApiKey) && (
+          <div className="mb-3 rounded-lg border border-emerald-200/60 bg-emerald-50/80 px-3 py-2 text-xs text-emerald-700">
+            <div className="mb-1 flex items-center gap-2">
+              <ShieldCheck className="size-3.5 shrink-0" />
+              Keys configured:
+            </div>
+            <div className="pl-5">
+              <div>OpenRouter: {hasApiKey ? 'Configured' : 'Not configured'}</div>
+              <div>Google Fact Check: {hasGoogleFactCheckApiKey ? 'Configured' : 'Not configured'}</div>
+            </div>
           </div>
         )}
 
-        <div className="flex gap-2">
-          <Input
-            ref={inputRef}
-            data-testid="api-key-input"
-            type="password"
-            autoComplete="off"
-            value={apiKey}
-            onChange={(e) => {
-              setApiKey(e.target.value);
-              setMessage('');
-            }}
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') void save();
-            }}
-            placeholder={hasApiKey ? 'Enter new key to replace...' : 'Paste your OpenRouter API key'}
-            className="font-mono text-xs"
-          />
-          <Button
-            data-testid="save-api-key"
-            onClick={() => void save()}
-            disabled={isSaving || !apiKey.trim()}
-            className="shrink-0"
-            size="sm"
-          >
-            {isSaving ? <LoaderCircle className="size-3.5 animate-spin" /> : 'Save'}
-          </Button>
+        <div className="space-y-3">
+          <div className="space-y-1.5">
+            <p className="text-xs font-semibold text-foreground/80">OpenRouter API key</p>
+            <div className="flex gap-2">
+              <Input
+                data-testid="api-key-input"
+                type="password"
+                autoComplete="off"
+                value={apiKey}
+                onChange={(e) => {
+                  setApiKey(e.target.value);
+                  setMessage('');
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') void saveOpenRouterKey();
+                }}
+                placeholder={hasApiKey ? 'Enter new key to replace...' : 'Paste your OpenRouter API key'}
+                className="font-mono text-xs"
+              />
+              <Button
+                data-testid="save-api-key"
+                onClick={() => void saveOpenRouterKey()}
+                disabled={isSavingOpenRouter || !apiKey.trim()}
+                className="shrink-0"
+                size="sm"
+              >
+                {isSavingOpenRouter ? <LoaderCircle className="size-3.5 animate-spin" /> : 'Save'}
+              </Button>
+            </div>
+          </div>
+
+          <div className="space-y-1.5">
+            <p className="text-xs font-semibold text-foreground/80">Google Fact Check API key</p>
+            <div className="flex gap-2">
+              <Input
+                data-testid="google-fact-check-key-input"
+                type="password"
+                autoComplete="off"
+                value={googleFactCheckApiKey}
+                onChange={(e) => {
+                  setGoogleFactCheckApiKey(e.target.value);
+                  setMessage('');
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') void saveGoogleFactCheckKey();
+                }}
+                placeholder={
+                  hasGoogleFactCheckApiKey
+                    ? 'Enter new key to replace...'
+                    : 'Paste your Google Fact Check API key'
+                }
+                className="font-mono text-xs"
+              />
+              <Button
+                data-testid="save-google-fact-check-key"
+                onClick={() => void saveGoogleFactCheckKey()}
+                disabled={isSavingGoogleFactCheck || !googleFactCheckApiKey.trim()}
+                className="shrink-0"
+                size="sm"
+              >
+                {isSavingGoogleFactCheck ? <LoaderCircle className="size-3.5 animate-spin" /> : 'Save'}
+              </Button>
+            </div>
+          </div>
         </div>
 
         {message && (
@@ -456,7 +539,7 @@ function FindingCard({
             ))}
           </div>
           <p className="line-clamp-2 text-[13px] leading-snug text-foreground/85">
-            "{finding.quote}"
+            {formatQuoteForDisplay(finding.quote)}
           </p>
         </div>
         <ChevronDown
@@ -594,7 +677,7 @@ function FindingCard({
 
                 {!evidence.apiStatus.googleFactCheckConfigured && (
                   <p className="evidence-warning">
-                    Google Fact Check API key is not configured for this build.
+                    Google Fact Check API key is not configured in Settings.
                   </p>
                 )}
 
@@ -705,6 +788,7 @@ function FindingCard({
 function App() {
   const [activeTabId, setActiveTabId] = useState<number | null>(null);
   const [hasApiKey, setHasApiKey] = useState(false);
+  const [hasGoogleFactCheckApiKey, setHasGoogleFactCheckApiKey] = useState(false);
   const [scanStatus, setScanStatus] = useState<ScanStatus>({
     state: 'idle',
     progress: 0,
@@ -779,7 +863,11 @@ function App() {
         const forcedTabId = tabParam && /^\d+$/.test(tabParam) ? Number(tabParam) : null;
 
         const [localStorageState, settings, tabs] = await Promise.all([
-          ext.storage.local.get([API_KEY_STORAGE_KEY, LEGACY_API_KEY_STORAGE_KEY]),
+          ext.storage.local.get([
+            API_KEY_STORAGE_KEY,
+            LEGACY_API_KEY_STORAGE_KEY,
+            GOOGLE_FACT_CHECK_API_KEY_STORAGE_KEY,
+          ]),
           sendMessage<SettingsResponse>({ type: 'GET_SETTINGS' }).catch(() => undefined),
           forcedTabId == null
             ? ext.tabs.query({ active: true, currentWindow: true })
@@ -793,7 +881,13 @@ function App() {
             localStorageState[API_KEY_STORAGE_KEY].trim().length > 0) ||
           (typeof localStorageState?.[LEGACY_API_KEY_STORAGE_KEY] === 'string' &&
             localStorageState[LEGACY_API_KEY_STORAGE_KEY].trim().length > 0);
+        const storageHasGoogleFactCheckKey =
+          typeof localStorageState?.[GOOGLE_FACT_CHECK_API_KEY_STORAGE_KEY] === 'string' &&
+          localStorageState[GOOGLE_FACT_CHECK_API_KEY_STORAGE_KEY].trim().length > 0;
         setHasApiKey(storageHasKey || Boolean(settings?.hasApiKey));
+        setHasGoogleFactCheckApiKey(
+          storageHasGoogleFactCheckKey || Boolean(settings?.hasGoogleFactCheckApiKey),
+        );
 
         const currentTabId = forcedTabId ?? tabs[0]?.id ?? null;
         setActiveTabId(currentTabId);
@@ -992,7 +1086,11 @@ function App() {
         </div>
         <SettingsModal
           hasApiKey={hasApiKey}
-          onSaved={() => setHasApiKey(true)}
+          hasGoogleFactCheckApiKey={hasGoogleFactCheckApiKey}
+          onSaved={(updates) => {
+            if (updates.openRouter) setHasApiKey(true);
+            if (updates.googleFactCheck) setHasGoogleFactCheckApiKey(true);
+          }}
         />
       </header>
 

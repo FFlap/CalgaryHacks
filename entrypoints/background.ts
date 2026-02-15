@@ -2,10 +2,13 @@ import { analyzeClaims } from '@/lib/analysis';
 import {
   clearFindingEvidenceForTab,
   getApiKey,
+  getGoogleFactCheckApiKey,
   getFindingEvidence,
   getReport,
   hasApiKey,
+  hasGoogleFactCheckApiKey,
   saveApiKey,
+  saveGoogleFactCheckApiKey,
   saveFindingEvidence,
   saveReport,
 } from '@/lib/storage';
@@ -176,6 +179,14 @@ function applyHighlightsInPage(findings: Array<Pick<Finding, 'id' | 'quote' | 'i
   const blockedTags = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEXTAREA', 'CODE', 'PRE']);
   const runtimeChrome = (globalThis as any).chrome;
   const clickBridgeKey = '__credHighlightClickBridgeInstalled';
+  const entityMap: Record<string, string> = {
+    '&amp;': '&',
+    '&quot;': '"',
+    '&#39;': "'",
+    '&apos;': "'",
+    '&lt;': '<',
+    '&gt;': '>',
+  };
 
   if (!(window as any)[clickBridgeKey]) {
     document.addEventListener(
@@ -195,8 +206,83 @@ function applyHighlightsInPage(findings: Array<Pick<Finding, 'id' | 'quote' | 'i
     (window as any)[clickBridgeKey] = true;
   }
 
+  const decodeHtmlEntities = (input: string) => {
+    let value = input;
+    for (let i = 0; i < 3; i += 1) {
+      const next = value
+        .replace(/&(amp|quot|#39|apos|lt|gt);/gi, (entity) => entityMap[entity.toLowerCase()] ?? entity)
+        .replace(/&#(\d+);/g, (_, codePointText) => {
+          const codePoint = Number(codePointText);
+          if (!Number.isFinite(codePoint)) return _;
+          try {
+            return String.fromCodePoint(codePoint);
+          } catch {
+            return _;
+          }
+        });
+      if (next === value) break;
+      value = next;
+    }
+    return value;
+  };
+
+  const normalizeForMatch = (input: string): { normalized: string; map: number[] } => {
+    let normalized = '';
+    const map: number[] = [];
+    let previousWasSpace = true;
+
+    for (let index = 0; index < input.length; index += 1) {
+      const char = input[index];
+      if (/\w/.test(char)) {
+        normalized += char.toLowerCase();
+        map.push(index);
+        previousWasSpace = false;
+        continue;
+      }
+
+      if (!previousWasSpace) {
+        normalized += ' ';
+        map.push(index);
+        previousWasSpace = true;
+      }
+    }
+
+    while (normalized.startsWith(' ')) {
+      normalized = normalized.slice(1);
+      map.shift();
+    }
+    while (normalized.endsWith(' ')) {
+      normalized = normalized.slice(0, -1);
+      map.pop();
+    }
+
+    return { normalized, map };
+  };
+
+  const buildNeedleVariants = (quote: string): string[] => {
+    const decoded = decodeHtmlEntities(quote).replace(/\s+/g, ' ').trim();
+    if (!decoded) return [];
+
+    const variants = new Set<string>();
+    variants.add(decoded);
+    variants.add(decoded.replace(/[“”"'`]+/g, '').trim());
+
+    const words = normalizeForMatch(decoded).normalized.split(' ').filter(Boolean);
+    if (words.length >= 6) {
+      variants.add(words.slice(0, Math.min(12, words.length)).join(' '));
+      variants.add(words.slice(0, Math.min(8, words.length)).join(' '));
+      variants.add(words.slice(0, Math.min(6, words.length)).join(' '));
+    }
+
+    return Array.from(variants).filter((variant) => variant.length >= 6);
+  };
+
   const findTextMatch = (needle: string) => {
-    const wanted = needle.toLowerCase();
+    const wantedRaw = decodeHtmlEntities(needle).replace(/\s+/g, ' ').trim().toLowerCase();
+    if (!wantedRaw) return null;
+    const wantedNormalized = normalizeForMatch(wantedRaw).normalized;
+    if (!wantedNormalized) return null;
+
     const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
       acceptNode(node) {
         const parent = node.parentElement;
@@ -210,11 +296,33 @@ function applyHighlightsInPage(findings: Array<Pick<Finding, 'id' | 'quote' | 'i
 
     let current: Text | null = walker.nextNode() as Text | null;
     while (current) {
-      const haystack = (current.textContent ?? '').toLowerCase();
-      const start = haystack.indexOf(wanted);
-      if (start !== -1) {
-        return { node: current, start, end: start + needle.length };
+      const haystack = current.textContent ?? '';
+      const haystackLower = haystack.toLowerCase();
+
+      const exactStart = haystackLower.indexOf(wantedRaw);
+      if (exactStart !== -1) {
+        return {
+          node: current,
+          start: exactStart,
+          end: exactStart + wantedRaw.length,
+        };
       }
+
+      const normalizedHaystack = normalizeForMatch(haystack);
+      const normalizedStart = normalizedHaystack.normalized.indexOf(wantedNormalized);
+      if (normalizedStart !== -1) {
+        const normalizedEnd = normalizedStart + wantedNormalized.length - 1;
+        const start = normalizedHaystack.map[normalizedStart];
+        const endAnchor = normalizedHaystack.map[normalizedEnd];
+        if (Number.isFinite(start) && Number.isFinite(endAnchor)) {
+          return {
+            node: current,
+            start,
+            end: Math.min(haystack.length, endAnchor + 1),
+          };
+        }
+      }
+
       current = walker.nextNode() as Text | null;
     }
     return null;
@@ -227,7 +335,12 @@ function applyHighlightsInPage(findings: Array<Pick<Finding, 'id' | 'quote' | 'i
     if (quote.length < 22) continue;
 
     const shortNeedle = quote.length > 220 ? quote.slice(0, 220) : quote;
-    const match = findTextMatch(shortNeedle) ?? findTextMatch(shortNeedle.replace(/[“”"'`]+/g, ''));
+    const variants = buildNeedleVariants(shortNeedle);
+    let match: { node: Text; start: number; end: number } | null = null;
+    for (const variant of variants) {
+      match = findTextMatch(variant);
+      if (match) break;
+    }
     if (!match) continue;
 
     const { node, start, end } = match;
@@ -687,6 +800,7 @@ async function resolveFindingEvidence(options: {
       quote: finding.quote,
       correction: finding.correction,
     },
+    googleFactCheckApiKey: await getGoogleFactCheckApiKey(),
   })
     .then(async (evidence) => {
       await saveFindingEvidence(tabId, findingId, evidence);
@@ -721,8 +835,21 @@ export default defineBackground(() => {
           return;
         }
 
+        case 'SAVE_GOOGLE_FACT_CHECK_API_KEY': {
+          const apiKey = message.apiKey.trim();
+          if (!apiKey) {
+            throw new Error('Google Fact Check API key cannot be empty.');
+          }
+          await saveGoogleFactCheckApiKey(apiKey);
+          sendResponse({ ok: true, hasGoogleFactCheckApiKey: true });
+          return;
+        }
+
         case 'GET_SETTINGS': {
-          sendResponse({ hasApiKey: await hasApiKey() });
+          sendResponse({
+            hasApiKey: await hasApiKey(),
+            hasGoogleFactCheckApiKey: await hasGoogleFactCheckApiKey(),
+          });
           return;
         }
 

@@ -141,6 +141,7 @@ export interface YouTubeTranscriptExtractionResult {
 
 export type RuntimeRequest =
   | { type: 'SAVE_API_KEY'; apiKey: string }
+  | { type: 'SAVE_GOOGLE_FACT_CHECK_API_KEY'; apiKey: string }
   | { type: 'GET_SETTINGS' }
   | { type: 'START_SCAN'; tabId?: number }
   | { type: 'GET_EMBEDDED_PANEL_STATE' }

@@ -231,6 +231,29 @@ export async function ensureApiKey(
   if (stored !== apiKey) {
     throw new Error('API key was not persisted in chrome.storage.local after Save.');
   }
+
+  const googleFactCheckApiKey = process.env.GOOGLE_FACT_CHECK_API_KEY?.trim();
+  if (!googleFactCheckApiKey) {
+    return;
+  }
+
+  const googleInput = popupPage.getByTestId('google-fact-check-key-input');
+  const googleSaveButton = popupPage.getByTestId('save-google-fact-check-key');
+  await googleInput.fill(googleFactCheckApiKey);
+  await googleSaveButton.click();
+  await popupPage.waitForTimeout(250);
+
+  const storedGoogleKey = await popupPage.evaluate(async () => {
+    const runtimeChrome = (globalThis as any).chrome;
+    const value = await runtimeChrome.storage.local.get(['google_fact_check_api_key']);
+    return value.google_fact_check_api_key ?? null;
+  });
+
+  if (storedGoogleKey !== googleFactCheckApiKey) {
+    throw new Error(
+      'Google Fact Check API key was not persisted in chrome.storage.local after Save.',
+    );
+  }
 }
 
 export async function startScan(

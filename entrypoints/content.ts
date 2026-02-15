@@ -56,6 +56,16 @@ function stateLabel(state: ScanStatus['state']): string {
   return 'Ready';
 }
 
+function formatQuoteForDisplay(input: string): string {
+  const cleaned = input
+    .replace(/\s+/g, ' ')
+    .trim()
+    .replace(/^[\s"'`“”‘’]+/, '')
+    .replace(/[\s"'`“”‘’]+$/, '')
+    .trim();
+  return cleaned ? `"${cleaned}"` : '""';
+}
+
 function nearTimestamp(a?: number, b?: number): boolean {
   if (!Number.isFinite(a) || !Number.isFinite(b)) return false;
   return Math.abs((a as number) - (b as number)) <= 1.2;
@@ -697,7 +707,7 @@ export default defineContentScript({
 
           const quote = document.createElement('p');
           quote.className = 'cred-quote';
-          quote.textContent = `"${finding.quote}"`;
+          quote.textContent = formatQuoteForDisplay(finding.quote);
 
           const rationale = document.createElement('p');
           rationale.className = 'cred-rationale';
