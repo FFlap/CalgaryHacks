@@ -390,16 +390,12 @@ function createPanelRoot(): HTMLElement {
 
 export default defineContentScript({
   matches: [
-    '*://www.youtube.com/watch*',
-    '*://youtube.com/watch*',
-    '*://m.youtube.com/watch*',
-    '*://music.youtube.com/watch*',
+    '*://www.youtube.com/*',
+    '*://youtube.com/*',
+    '*://m.youtube.com/*',
+    '*://music.youtube.com/*',
   ],
   main() {
-    if (!isWatchUrl(location.href)) {
-      return;
-    }
-
     installStyles();
 
     let currentUrl = location.href;
@@ -844,12 +840,12 @@ export default defineContentScript({
     const reportFingerprint = (value: ScanReport | null) =>
       value
         ? [
-            value.scannedAt,
-            value.summary.totalFindings,
-            value.findings.length,
-            value.transcript?.segments.length ?? 0,
-            value.transcript?.unavailableReason ?? '',
-          ].join('|')
+          value.scannedAt,
+          value.summary.totalFindings,
+          value.findings.length,
+          value.transcript?.segments.length ?? 0,
+          value.transcript?.unavailableReason ?? '',
+        ].join('|')
         : 'null';
 
     const startPolling = () => {
