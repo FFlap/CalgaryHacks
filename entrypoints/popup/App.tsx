@@ -21,7 +21,16 @@ import {
   DialogTrigger,
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
-import type { Finding, IssueType, RuntimeRequest, ScanReport, ScanStatus } from '@/lib/types';
+import type {
+  CorroborationItem,
+  Finding,
+  FindingEvidence,
+  IssueType,
+  RuntimeRequest,
+  ScanReport,
+  ScanStatus,
+  VerificationCode,
+} from '@/lib/types';
 
 /* ------------------------------------------------------------------ */
 /*  Extension runtime bridge                                          */
@@ -34,7 +43,17 @@ const LEGACY_API_KEY_STORAGE_KEY = 'gemini_api_key';
 type ReportResponse = { report: ScanReport | null };
 type SettingsResponse = { hasApiKey: boolean };
 type FocusResponse = { findingId: string | null };
+type EvidenceResponse = {
+  ok: boolean;
+  evidence?: FindingEvidence;
+  error?: string;
+};
 type FilterKey = 'all' | IssueType;
+type FindingEvidenceState =
+  | { status: 'idle' }
+  | { status: 'loading' }
+  | { status: 'loaded'; evidence: FindingEvidence }
+  | { status: 'error'; message: string };
 
 const runningStates = new Set<ScanStatus['state']>(['extracting', 'analyzing', 'highlighting']);
 
@@ -131,6 +150,39 @@ function issueColor(issue: IssueType) {
   if (issue === 'misinformation') return 'bg-red-500/10 text-red-700 border-red-300/60';
   if (issue === 'fallacy') return 'bg-amber-500/10 text-amber-700 border-amber-300/60';
   return 'bg-sky-500/10 text-sky-700 border-sky-300/60';
+}
+
+function verificationPillClass(code: VerificationCode) {
+  if (code === 'supported') return 'evidence-status-pill evidence-status-pill--supported';
+  if (code === 'contradicted') return 'evidence-status-pill evidence-status-pill--contradicted';
+  if (code === 'contested') return 'evidence-status-pill evidence-status-pill--contested';
+  return 'evidence-status-pill evidence-status-pill--unverified';
+}
+
+function formatEvidenceDate(dateValue?: string) {
+  if (!dateValue) return '';
+  const parsed = new Date(dateValue);
+  if (Number.isNaN(parsed.getTime())) return dateValue;
+  return parsed.toLocaleDateString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    year: 'numeric',
+  });
+}
+
+function renderCorroborationRows(rows: CorroborationItem[]) {
+  return rows.map((item) => (
+    <article key={`${item.source}-${item.url}`} className="evidence-source-card">
+      <div className="evidence-source-card-head">
+        <span className="evidence-source-chip">{item.source}</span>
+      </div>
+      <p className="evidence-source-title">{item.title}</p>
+      {item.snippet && <p className="evidence-source-snippet">{item.snippet}</p>}
+      <a href={item.url} target="_blank" rel="noopener noreferrer" className="evidence-source-link">
+        Open source
+      </a>
+    </article>
+  ));
 }
 
 function stateLabel(state: ScanStatus['state']) {
@@ -354,15 +406,31 @@ function FindingCard({
   finding,
   isExpanded,
   isFocused,
+  evidenceState,
   onToggle,
   onJump,
+  onLoadEvidence,
+  onRetryEvidence,
 }: {
   finding: Finding;
   isExpanded: boolean;
   isFocused: boolean;
+  evidenceState: FindingEvidenceState;
   onToggle: () => void;
   onJump: () => void;
+  onLoadEvidence: () => void;
+  onRetryEvidence: () => void;
 }) {
+  const evidence = evidenceState.status === 'loaded' ? evidenceState.evidence : null;
+  const evidenceErrors: Array<[string, string]> = [];
+  if (evidence) {
+    for (const [source, message] of Object.entries(evidence.errors)) {
+      if (typeof message === 'string' && message.trim()) {
+        evidenceErrors.push([source, message]);
+      }
+    }
+  }
+
   return (
     <article
       data-testid="finding-card"
@@ -454,6 +522,176 @@ function FindingCard({
             <Radar className="size-3.5" />
             Jump to highlight
           </Button>
+
+          <section className="evidence-panel" data-testid="finding-evidence-panel">
+            <div className="evidence-panel-head">
+              <p className="evidence-panel-title">Trusted sources</p>
+              {evidence && (
+                <span className={verificationPillClass(evidence.status.code)} data-testid="evidence-status-pill">
+                  {evidence.status.label}
+                </span>
+              )}
+            </div>
+
+            {evidenceState.status === 'idle' && (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onLoadEvidence();
+                }}
+                className="h-7 text-xs"
+                data-testid="load-evidence"
+              >
+                Load trusted sources
+              </Button>
+            )}
+
+            {evidenceState.status === 'loading' && (
+              <div className="evidence-loading" data-testid="evidence-loading">
+                <div className="evidence-skeleton evidence-skeleton--w70" />
+                <div className="evidence-skeleton evidence-skeleton--w90" />
+                <div className="evidence-skeleton evidence-skeleton--w80" />
+              </div>
+            )}
+
+            {evidenceState.status === 'error' && (
+              <div className="evidence-error" data-testid="evidence-error">
+                <p>{evidenceState.message}</p>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    onRetryEvidence();
+                  }}
+                  className="h-7 text-xs"
+                >
+                  Retry
+                </Button>
+              </div>
+            )}
+
+            {evidence && (
+              <div className="evidence-content" data-testid="evidence-content">
+                <p className="evidence-reason" data-testid="evidence-status-reason">
+                  {evidence.status.reason}
+                </p>
+                <div className="evidence-meta-row">
+                  <span>Confidence: {evidence.status.confidence}</span>
+                  <button
+                    type="button"
+                    className="evidence-refresh-button"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      onRetryEvidence();
+                    }}
+                  >
+                    Refresh sources
+                  </button>
+                </div>
+
+                {!evidence.apiStatus.googleFactCheckConfigured && (
+                  <p className="evidence-warning">
+                    Google Fact Check API key is not configured for this build.
+                  </p>
+                )}
+
+                <div className="evidence-section">
+                  <h4>Fact-check matches</h4>
+                  {evidence.factChecks.length === 0 ? (
+                    <p className="evidence-empty">No direct ClaimReview match found.</p>
+                  ) : (
+                    <div className="evidence-source-list" data-testid="factcheck-list">
+                      {evidence.factChecks.map((match) => (
+                        <article key={`${match.reviewUrl}-${match.publisher}`} className="evidence-source-card">
+                          <div className="evidence-source-card-head">
+                            <span className="evidence-source-chip">{match.publisher}</span>
+                            <span className={verificationPillClass(
+                              match.normalizedVerdict === 'unknown' ? 'unverified' : match.normalizedVerdict,
+                            )}>
+                              {match.textualRating || match.normalizedVerdict}
+                            </span>
+                          </div>
+                          <p className="evidence-source-title">{match.reviewTitle}</p>
+                          {match.claimText && (
+                            <p className="evidence-source-snippet">Claim: {match.claimText}</p>
+                          )}
+                          <div className="evidence-source-meta">
+                            {match.reviewDate && <span>{formatEvidenceDate(match.reviewDate)}</span>}
+                            {match.reviewUrl && (
+                              <a
+                                href={match.reviewUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="evidence-source-link"
+                              >
+                                Open fact-check
+                              </a>
+                            )}
+                          </div>
+                        </article>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                <div className="evidence-section">
+                  <h4>Corroboration sources</h4>
+                  {evidence.corroboration.wikipedia.length === 0 &&
+                  evidence.corroboration.wikidata.length === 0 &&
+                  evidence.corroboration.pubmed.length === 0 ? (
+                    <p className="evidence-empty">No corroboration sources found.</p>
+                  ) : (
+                    <div className="evidence-source-list" data-testid="corroboration-list">
+                      {renderCorroborationRows(evidence.corroboration.wikipedia)}
+                      {renderCorroborationRows(evidence.corroboration.wikidata)}
+                      {renderCorroborationRows(evidence.corroboration.pubmed)}
+                    </div>
+                  )}
+                </div>
+
+                <div className="evidence-section">
+                  <h4>Related reporting (GDELT)</h4>
+                  {evidence.gdeltArticles.length === 0 ? (
+                    <p className="evidence-empty">No related GDELT articles found.</p>
+                  ) : (
+                    <div className="evidence-source-list" data-testid="gdelt-list">
+                      {evidence.gdeltArticles.map((article) => (
+                        <article key={article.url} className="evidence-source-card">
+                          <div className="evidence-source-card-head">
+                            <span className="evidence-source-chip">{article.domain}</span>
+                            {typeof article.tone === 'number' && (
+                              <span className="evidence-source-meta-text">
+                                Tone {article.tone > 0 ? '+' : ''}
+                                {article.tone.toFixed(1)}
+                              </span>
+                            )}
+                          </div>
+                          <p className="evidence-source-title">{article.title}</p>
+                          <div className="evidence-source-meta">
+                            {article.seenDate && <span>{formatEvidenceDate(article.seenDate)}</span>}
+                            <a href={article.url} target="_blank" rel="noopener noreferrer" className="evidence-source-link">
+                              Open article
+                            </a>
+                          </div>
+                        </article>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {evidenceErrors.length > 0 && (
+                  <div className="evidence-partial-errors" data-testid="evidence-partial-errors">
+                    {evidenceErrors.map(([source, message]) => (
+                      <p key={source}>{`${source}: ${message}`}</p>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </section>
         </div>
       </div>
     </article>
@@ -477,6 +715,7 @@ function App() {
   const [filter, setFilter] = useState<FilterKey>('all');
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [focusedFindingId, setFocusedFindingId] = useState<string | null>(null);
+  const [evidenceByFinding, setEvidenceByFinding] = useState<Record<string, FindingEvidenceState>>({});
 
   /* ---- data loading ---- */
 
@@ -490,6 +729,46 @@ function App() {
     );
     setReport(reportResponse?.report ?? null);
   }, []);
+
+  const loadFindingEvidence = useCallback(
+    async (findingId: string, forceRefresh = false) => {
+      if (activeTabId == null) return;
+
+      const currentState = evidenceByFinding[findingId];
+      if (!forceRefresh && (currentState?.status === 'loading' || currentState?.status === 'loaded')) {
+        return;
+      }
+
+      setEvidenceByFinding((prev) => ({ ...prev, [findingId]: { status: 'loading' } }));
+
+      try {
+        const response = await sendMessage<EvidenceResponse>({
+          type: 'GET_FINDING_EVIDENCE',
+          tabId: activeTabId,
+          findingId,
+          forceRefresh,
+        });
+
+        if (!response?.ok || !response.evidence) {
+          throw new Error(response?.error || 'Failed to load trusted sources.');
+        }
+
+        setEvidenceByFinding((prev) => ({
+          ...prev,
+          [findingId]: { status: 'loaded', evidence: response.evidence as FindingEvidence },
+        }));
+      } catch (error) {
+        setEvidenceByFinding((prev) => ({
+          ...prev,
+          [findingId]: {
+            status: 'error',
+            message: error instanceof Error ? error.message : 'Failed to load trusted sources.',
+          },
+        }));
+      }
+    },
+    [activeTabId, evidenceByFinding],
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -605,6 +884,10 @@ function App() {
   }, [activeTabId, report]);
 
   useEffect(() => {
+    setEvidenceByFinding({});
+  }, [report?.tabId, report?.scannedAt]);
+
+  useEffect(() => {
     if (!focusedFindingId || !report) return;
     const found = report.findings.some((finding) => finding.id === focusedFindingId);
     if (!found) return;
@@ -620,6 +903,11 @@ function App() {
 
     return () => clearTimeout(timer);
   }, [focusedFindingId, report]);
+
+  useEffect(() => {
+    if (!expandedId) return;
+    void loadFindingEvidence(expandedId);
+  }, [expandedId, loadFindingEvidence]);
 
   /* ---- actions ---- */
 
@@ -639,6 +927,7 @@ function App() {
     }
 
     try {
+      setEvidenceByFinding({});
       setScanStatus({
         tabId: activeTabId,
         state: 'extracting',
@@ -822,10 +1111,13 @@ function App() {
                 finding={finding}
                 isExpanded={expandedId === finding.id}
                 isFocused={focusedFindingId === finding.id}
+                evidenceState={evidenceByFinding[finding.id] ?? { status: 'idle' }}
                 onToggle={() =>
                   setExpandedId((prev) => (prev === finding.id ? null : finding.id))
                 }
                 onJump={() => void jumpToFinding(finding.id)}
+                onLoadEvidence={() => void loadFindingEvidence(finding.id)}
+                onRetryEvidence={() => void loadFindingEvidence(finding.id, true)}
               />
             ))
           )}

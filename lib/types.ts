@@ -7,6 +7,73 @@ export type ScanState =
   | 'error';
 
 export type IssueType = 'misinformation' | 'fallacy' | 'bias';
+export type VerificationCode = 'supported' | 'contradicted' | 'contested' | 'unverified';
+export type NormalizedVerdict = 'supported' | 'contradicted' | 'contested' | 'unknown';
+export type CorroborationSource = 'Wikipedia' | 'Wikidata' | 'PubMed';
+
+export interface VerificationStatus {
+  code: VerificationCode;
+  label: string;
+  reason: string;
+  confidence: 'high' | 'medium' | 'low';
+}
+
+export interface FactCheckMatch {
+  claimText: string;
+  claimant?: string;
+  publisher: string;
+  reviewTitle: string;
+  textualRating?: string;
+  reviewUrl: string;
+  reviewDate?: string;
+  languageCode?: string;
+  normalizedVerdict: NormalizedVerdict;
+  sourceType: 'Google Fact Check API';
+}
+
+export interface CorroborationItem {
+  title: string;
+  snippet: string;
+  url: string;
+  source: CorroborationSource;
+}
+
+export interface GdeltArticle {
+  title: string;
+  url: string;
+  domain: string;
+  tone?: number;
+  seenDate?: string;
+  language?: string;
+}
+
+export interface EvidenceErrors {
+  factChecks?: string;
+  wikipedia?: string;
+  wikidata?: string;
+  pubmed?: string;
+  gdelt?: string;
+}
+
+export interface FindingEvidence {
+  tabId: number;
+  findingId: string;
+  findingQuote: string;
+  query: string;
+  generatedAt: string;
+  status: VerificationStatus;
+  factChecks: FactCheckMatch[];
+  corroboration: {
+    wikipedia: CorroborationItem[];
+    wikidata: CorroborationItem[];
+    pubmed: CorroborationItem[];
+  };
+  gdeltArticles: GdeltArticle[];
+  apiStatus: {
+    googleFactCheckConfigured: boolean;
+  };
+  errors: EvidenceErrors;
+}
 
 export interface TranscriptSegment {
   id: string;
@@ -79,6 +146,7 @@ export type RuntimeRequest =
   | { type: 'GET_EMBEDDED_PANEL_STATE' }
   | { type: 'GET_SCAN_STATUS'; tabId?: number }
   | { type: 'GET_REPORT'; tabId: number }
+  | { type: 'GET_FINDING_EVIDENCE'; tabId: number; findingId: string; forceRefresh?: boolean }
   | { type: 'GET_FOCUS_FINDING'; tabId: number }
   | { type: 'OPEN_POPUP_FOR_FINDING'; findingId: string; tabId?: number }
   | { type: 'JUMP_TO_FINDING'; tabId: number; findingId: string }
