@@ -2,15 +2,19 @@ import { analyzeClaims } from '@/lib/analysis';
 import {
   clearFindingEvidenceForTab,
   getApiKey,
+  getGoogleFactCheckApiKey,
   getFindingEvidence,
   getReport,
   hasApiKey,
+  hasGoogleFactCheckApiKey,
   saveApiKey,
+  saveGoogleFactCheckApiKey,
   saveFindingEvidence,
   saveReport,
 } from '@/lib/storage';
 import { buildFindingEvidence } from '@/lib/verification';
 import type {
+  EmbeddedPanelUpdate,
   ExtractionResult,
   Finding,
   FindingEvidence,
@@ -18,7 +22,11 @@ import type {
   ScanReport,
   ScanState,
   ScanStatus,
+  TranscriptSegment,
+  YouTubeTranscriptExtractionResult,
 } from '@/lib/types';
+import { fetchTranscript } from 'youtube-transcript-plus';
+import { formatTimeLabel, normalizeTranscriptSegments, validateTranscriptSegments } from '@/lib/youtube-transcript';
 
 const MAX_ANALYSIS_CHARS = 60_000;
 
@@ -30,6 +38,47 @@ const focusedFindingByTab = new Map<number, string>();
 const inFlightScans = new Map<number, Promise<void>>();
 const inFlightEvidence = new Map<string, Promise<FindingEvidence>>();
 
+function parseYouTubeVideoId(url: string): string | undefined {
+  try {
+    const parsed = new URL(url);
+    const hostname = parsed.hostname.toLowerCase();
+    const allowedHosts = new Set([
+      'www.youtube.com',
+      'youtube.com',
+      'm.youtube.com',
+      'music.youtube.com',
+    ]);
+    if (!allowedHosts.has(hostname)) return undefined;
+    return parsed.searchParams.get('v') ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function isYouTubeWatchUrl(url: string): boolean {
+  return parseYouTubeVideoId(url) !== undefined;
+}
+
+async function getReportForTab(tabId: number): Promise<ScanReport | null> {
+  return reportByTab.get(tabId) ?? (await getReport(tabId));
+}
+
+function notifyEmbeddedPanel(tabId: number) {
+  const status = statusByTab.get(tabId);
+  if (!status) return;
+
+  const payload: EmbeddedPanelUpdate = {
+    type: 'EMBEDDED_PANEL_UPDATE',
+    tabId,
+    status,
+    report: reportByTab.get(tabId) ?? null,
+  };
+
+  void Promise.resolve(ext.tabs.sendMessage(tabId, payload)).catch(() => {
+    // Ignore when no content script is attached.
+  });
+}
+
 function setStatus(tabId: number, state: ScanState, message: string, progress: number, errorCode?: string) {
   statusByTab.set(tabId, {
     tabId,
@@ -39,6 +88,7 @@ function setStatus(tabId: number, state: ScanState, message: string, progress: n
     updatedAt: Date.now(),
     errorCode,
   });
+  notifyEmbeddedPanel(tabId);
 }
 
 async function getActiveTabId(): Promise<number> {
@@ -129,6 +179,14 @@ function applyHighlightsInPage(findings: Array<Pick<Finding, 'id' | 'quote' | 'i
   const blockedTags = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEXTAREA', 'CODE', 'PRE']);
   const runtimeChrome = (globalThis as any).chrome;
   const clickBridgeKey = '__credHighlightClickBridgeInstalled';
+  const entityMap: Record<string, string> = {
+    '&amp;': '&',
+    '&quot;': '"',
+    '&#39;': "'",
+    '&apos;': "'",
+    '&lt;': '<',
+    '&gt;': '>',
+  };
 
   if (!(window as any)[clickBridgeKey]) {
     document.addEventListener(
@@ -148,8 +206,83 @@ function applyHighlightsInPage(findings: Array<Pick<Finding, 'id' | 'quote' | 'i
     (window as any)[clickBridgeKey] = true;
   }
 
+  const decodeHtmlEntities = (input: string) => {
+    let value = input;
+    for (let i = 0; i < 3; i += 1) {
+      const next = value
+        .replace(/&(amp|quot|#39|apos|lt|gt);/gi, (entity) => entityMap[entity.toLowerCase()] ?? entity)
+        .replace(/&#(\d+);/g, (_, codePointText) => {
+          const codePoint = Number(codePointText);
+          if (!Number.isFinite(codePoint)) return _;
+          try {
+            return String.fromCodePoint(codePoint);
+          } catch {
+            return _;
+          }
+        });
+      if (next === value) break;
+      value = next;
+    }
+    return value;
+  };
+
+  const normalizeForMatch = (input: string): { normalized: string; map: number[] } => {
+    let normalized = '';
+    const map: number[] = [];
+    let previousWasSpace = true;
+
+    for (let index = 0; index < input.length; index += 1) {
+      const char = input[index];
+      if (/\w/.test(char)) {
+        normalized += char.toLowerCase();
+        map.push(index);
+        previousWasSpace = false;
+        continue;
+      }
+
+      if (!previousWasSpace) {
+        normalized += ' ';
+        map.push(index);
+        previousWasSpace = true;
+      }
+    }
+
+    while (normalized.startsWith(' ')) {
+      normalized = normalized.slice(1);
+      map.shift();
+    }
+    while (normalized.endsWith(' ')) {
+      normalized = normalized.slice(0, -1);
+      map.pop();
+    }
+
+    return { normalized, map };
+  };
+
+  const buildNeedleVariants = (quote: string): string[] => {
+    const decoded = decodeHtmlEntities(quote).replace(/\s+/g, ' ').trim();
+    if (!decoded) return [];
+
+    const variants = new Set<string>();
+    variants.add(decoded);
+    variants.add(decoded.replace(/[“”"'`]+/g, '').trim());
+
+    const words = normalizeForMatch(decoded).normalized.split(' ').filter(Boolean);
+    if (words.length >= 6) {
+      variants.add(words.slice(0, Math.min(12, words.length)).join(' '));
+      variants.add(words.slice(0, Math.min(8, words.length)).join(' '));
+      variants.add(words.slice(0, Math.min(6, words.length)).join(' '));
+    }
+
+    return Array.from(variants).filter((variant) => variant.length >= 6);
+  };
+
   const findTextMatch = (needle: string) => {
-    const wanted = needle.toLowerCase();
+    const wantedRaw = decodeHtmlEntities(needle).replace(/\s+/g, ' ').trim().toLowerCase();
+    if (!wantedRaw) return null;
+    const wantedNormalized = normalizeForMatch(wantedRaw).normalized;
+    if (!wantedNormalized) return null;
+
     const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
       acceptNode(node) {
         const parent = node.parentElement;
@@ -163,11 +296,33 @@ function applyHighlightsInPage(findings: Array<Pick<Finding, 'id' | 'quote' | 'i
 
     let current: Text | null = walker.nextNode() as Text | null;
     while (current) {
-      const haystack = (current.textContent ?? '').toLowerCase();
-      const start = haystack.indexOf(wanted);
-      if (start !== -1) {
-        return { node: current, start, end: start + needle.length };
+      const haystack = current.textContent ?? '';
+      const haystackLower = haystack.toLowerCase();
+
+      const exactStart = haystackLower.indexOf(wantedRaw);
+      if (exactStart !== -1) {
+        return {
+          node: current,
+          start: exactStart,
+          end: exactStart + wantedRaw.length,
+        };
       }
+
+      const normalizedHaystack = normalizeForMatch(haystack);
+      const normalizedStart = normalizedHaystack.normalized.indexOf(wantedNormalized);
+      if (normalizedStart !== -1) {
+        const normalizedEnd = normalizedStart + wantedNormalized.length - 1;
+        const start = normalizedHaystack.map[normalizedStart];
+        const endAnchor = normalizedHaystack.map[normalizedEnd];
+        if (Number.isFinite(start) && Number.isFinite(endAnchor)) {
+          return {
+            node: current,
+            start,
+            end: Math.min(haystack.length, endAnchor + 1),
+          };
+        }
+      }
+
       current = walker.nextNode() as Text | null;
     }
     return null;
@@ -180,7 +335,12 @@ function applyHighlightsInPage(findings: Array<Pick<Finding, 'id' | 'quote' | 'i
     if (quote.length < 22) continue;
 
     const shortNeedle = quote.length > 220 ? quote.slice(0, 220) : quote;
-    const match = findTextMatch(shortNeedle) ?? findTextMatch(shortNeedle.replace(/[“”"'`]+/g, ''));
+    const variants = buildNeedleVariants(shortNeedle);
+    let match: { node: Text; start: number; end: number } | null = null;
+    for (const variant of variants) {
+      match = findTextMatch(variant);
+      if (match) break;
+    }
     if (!match) continue;
 
     const { node, start, end } = match;
@@ -259,13 +419,15 @@ function extractVisibleTextInPage(): ExtractionResult {
 
 async function executeOnTab<T>(
   tabId: number,
-  func: (...args: any[]) => T,
+  func: (...args: any[]) => T | Promise<T>,
   args: any[] = [],
+  world: 'ISOLATED' | 'MAIN' = 'ISOLATED',
 ): Promise<T> {
   const [result] = await ext.scripting.executeScript({
     target: { tabId },
     func,
     args,
+    world: world as any,
   });
 
   if (!result || typeof result.result === 'undefined') {
@@ -273,6 +435,140 @@ async function executeOnTab<T>(
   }
 
   return result.result as T;
+}
+
+async function fetchTranscriptByVideoId(
+  videoId: string,
+  tabId?: number,
+): Promise<YouTubeTranscriptExtractionResult> {
+  const preferredLang = (globalThis.navigator?.language ?? 'en').split('-')[0];
+  const languageAttempts = Array.from(new Set([preferredLang, 'en'])).filter(Boolean);
+
+  const runTabFetch = async (params: {
+    url: string;
+    method: 'GET' | 'POST';
+    body?: string;
+    headers?: Record<string, string>;
+    lang?: string;
+  }): Promise<Response> => {
+    if (!tabId) {
+      throw new Error('No YouTube tab context available for transcript fetch.');
+    }
+
+    const result = await executeOnTab<{
+      status: number;
+      statusText: string;
+      headers: Array<[string, string]>;
+      body: string;
+    }>(
+      tabId,
+      async (request) => {
+        const safeHeaders = new Headers(request.headers ?? {});
+        safeHeaders.delete('User-Agent');
+        if (request.lang && !safeHeaders.has('Accept-Language')) {
+          safeHeaders.set('Accept-Language', request.lang);
+        }
+        const response = await fetch(request.url, {
+          method: request.method ?? 'GET',
+          headers: safeHeaders,
+          body: request.method === 'POST' ? request.body : undefined,
+          credentials: 'include',
+          cache: 'no-store',
+        });
+        return {
+          status: response.status,
+          statusText: response.statusText,
+          headers: Array.from(response.headers.entries()),
+          body: await response.text(),
+        };
+      },
+      [params],
+      'MAIN',
+    );
+
+    return new Response(result.body, {
+      status: result.status,
+      statusText: result.statusText,
+      headers: result.headers,
+    });
+  };
+
+  const extensionFetch = async (params: {
+    url: string;
+    lang?: string;
+    userAgent?: string;
+    method?: 'GET' | 'POST';
+    body?: string;
+    headers?: Record<string, string>;
+  }): Promise<Response> => {
+    const safeHeaders = new Headers(params.headers ?? {});
+    safeHeaders.delete('User-Agent');
+    if (params.lang && !safeHeaders.has('Accept-Language')) {
+      safeHeaders.set('Accept-Language', params.lang);
+    }
+
+    return fetch(params.url, {
+      method: params.method ?? 'GET',
+      headers: safeHeaders,
+      body: params.method === 'POST' ? params.body : undefined,
+      credentials: 'include',
+      cache: 'no-store',
+    });
+  };
+
+  const transcriptFetchHook = async (params: {
+    url: string;
+    lang?: string;
+    userAgent?: string;
+    method?: 'GET' | 'POST';
+    body?: string;
+    headers?: Record<string, string>;
+  }): Promise<Response> => {
+    const normalized = {
+      ...params,
+      method: params.method ?? 'GET',
+    };
+    if (tabId) {
+      return runTabFetch(normalized);
+    }
+    return extensionFetch(normalized);
+  };
+
+  let lastError: string | undefined;
+  for (const lang of [...languageAttempts, undefined]) {
+    try {
+      const rawSegments = await fetchTranscript(videoId, {
+        ...(lang ? { lang } : {}),
+        videoFetch: transcriptFetchHook,
+        playerFetch: transcriptFetchHook,
+        transcriptFetch: transcriptFetchHook,
+      });
+      const segments = normalizeTranscriptSegments(
+        rawSegments.map((segment) => ({
+          startSec: Number(segment.offset),
+          startLabel: formatTimeLabel(Number(segment.offset)),
+          text: segment.text,
+        })),
+      );
+      const validation = validateTranscriptSegments(segments);
+      if (!validation.ok) {
+        lastError = `Transcript validation failed (${validation.reason ?? 'invalid_segments'}).`;
+        continue;
+      }
+      return {
+        ok: true,
+        source: 'youtube_api',
+        segments,
+      };
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : 'Unknown transcript error.';
+    }
+  }
+
+  return {
+    ok: false,
+    reason: lastError ?? 'Transcript unavailable for this video.',
+  };
 }
 
 async function runScan(tabId: number): Promise<void> {
@@ -291,37 +587,105 @@ async function runScan(tabId: number): Promise<void> {
       throw new Error('The page did not provide enough visible text to analyze.');
     }
 
-    const truncatedText = extraction.text.slice(0, MAX_ANALYSIS_CHARS);
-    const truncated = extraction.text.length > MAX_ANALYSIS_CHARS;
+    const youtubeMode = isYouTubeWatchUrl(extraction.url);
+    const videoId = parseYouTubeVideoId(extraction.url);
+    let transcriptSegments: TranscriptSegment[] = [];
+    let transcriptSource: 'youtube_api' | undefined;
+    let analysisText = extraction.text;
+
+    if (youtubeMode) {
+      setStatus(tabId, 'extracting', 'Collecting YouTube transcript...', 0.2);
+      if (!videoId) {
+        setStatus(tabId, 'error', 'Missing YouTube video id.', 1, 'invalid_video_id');
+        return;
+      }
+
+      const transcript = await fetchTranscriptByVideoId(videoId, tabId);
+      if (!transcript.ok || !transcript.segments || transcript.segments.length === 0) {
+        const report: ScanReport = {
+          tabId,
+          url: extraction.url,
+          title: extraction.title,
+          scanKind: 'youtube_video',
+          videoId,
+          transcript: {
+            source: 'youtube_api',
+            segments: [],
+            unavailableReason: transcript.reason ?? 'Transcript unavailable.',
+          },
+          scannedAt: new Date().toISOString(),
+          summary: {
+            totalFindings: 0,
+            misinformationCount: 0,
+            fallacyCount: 0,
+            biasCount: 0,
+          },
+          findings: [],
+          truncated: false,
+          analyzedChars: 0,
+        };
+        reportByTab.set(tabId, report);
+        await saveReport(tabId, report);
+        notifyEmbeddedPanel(tabId);
+        setStatus(
+          tabId,
+          'error',
+          transcript.reason ?? 'Transcript unavailable from youtube-transcript-plus.',
+          1,
+          'transcript_unavailable',
+        );
+        return;
+      }
+
+      transcriptSegments = transcript.segments;
+      transcriptSource = transcript.source;
+      analysisText = transcriptSegments.map((segment) => `[${segment.startLabel}] ${segment.text}`).join('\n');
+    }
+
+    const truncatedText = analysisText.slice(0, MAX_ANALYSIS_CHARS);
+    const truncated = analysisText.length > MAX_ANALYSIS_CHARS;
 
     setStatus(tabId, 'analyzing', 'Analyzing claims with OpenRouter Trinity...', 0.55);
-    const report = await analyzeClaims({
+    let report = await analyzeClaims({
       apiKey,
       tabId,
       url: extraction.url,
       title: extraction.title,
       text: truncatedText,
+      transcriptSegments,
       truncated,
       analyzedChars: truncatedText.length,
     });
 
-    setStatus(tabId, 'highlighting', 'Placing inline evidence highlights...', 0.82);
+    if (youtubeMode) {
+      report = {
+        ...report,
+        scanKind: 'youtube_video',
+        videoId,
+        transcript: {
+          source: transcriptSource ?? 'youtube_api',
+          segments: transcriptSegments,
+        },
+      };
+    } else {
+      setStatus(tabId, 'highlighting', 'Placing inline evidence highlights...', 0.82);
+      const highlightResult = await executeOnTab<{ appliedIds: string[]; appliedCount: number }>(
+        tabId,
+        applyHighlightsInPage,
+        [report.findings.map(({ id, quote, issueTypes, severity }) => ({ id, quote, issueTypes, severity }))],
+      );
 
-    const highlightResult = await executeOnTab<{ appliedIds: string[]; appliedCount: number }>(
-      tabId,
-      applyHighlightsInPage,
-      [report.findings.map(({ id, quote, issueTypes, severity }) => ({ id, quote, issueTypes, severity }))],
-    );
-
-    const appliedIdSet = new Set(highlightResult.appliedIds);
-    report.findings = report.findings.map((finding) => ({
-      ...finding,
-      highlightApplied: appliedIdSet.has(finding.id),
-    }));
+      const appliedIdSet = new Set(highlightResult.appliedIds);
+      report.findings = report.findings.map((finding) => ({
+        ...finding,
+        highlightApplied: appliedIdSet.has(finding.id),
+      }));
+    }
 
     reportByTab.set(tabId, report);
     await saveReport(tabId, report);
     await clearFindingEvidenceForTab(tabId);
+    notifyEmbeddedPanel(tabId);
 
     const suffix = report.summary.totalFindings === 0 ? 'No high-confidence issues found.' : `${report.summary.totalFindings} high-confidence findings.`;
     setStatus(tabId, 'done', suffix, 1);
@@ -344,8 +708,9 @@ async function startScan(tabId: number) {
   inFlightScans.set(tabId, job);
 }
 
-async function resolveStatusTabId(preferred?: number): Promise<number | undefined> {
+async function resolveStatusTabId(preferred?: number, senderTabId?: number): Promise<number | undefined> {
   if (preferred) return preferred;
+  if (senderTabId) return senderTabId;
   try {
     return await getActiveTabId();
   } catch {
@@ -396,10 +761,6 @@ function isEvidenceStale(evidence: FindingEvidence): boolean {
   return Date.now() - generatedAt > EVIDENCE_CACHE_MAX_AGE_MS;
 }
 
-async function getReportForTab(tabId: number): Promise<ScanReport | null> {
-  return reportByTab.get(tabId) ?? (await getReport(tabId));
-}
-
 async function resolveFindingEvidence(options: {
   tabId: number;
   findingId: string;
@@ -439,6 +800,7 @@ async function resolveFindingEvidence(options: {
       quote: finding.quote,
       correction: finding.correction,
     },
+    googleFactCheckApiKey: await getGoogleFactCheckApiKey(),
   })
     .then(async (evidence) => {
       await saveFindingEvidence(tabId, findingId, evidence);
@@ -453,6 +815,13 @@ async function resolveFindingEvidence(options: {
 }
 
 export default defineBackground(() => {
+  ext.tabs.onRemoved.addListener((tabId) => {
+    statusByTab.delete(tabId);
+    reportByTab.delete(tabId);
+    focusedFindingByTab.delete(tabId);
+    inFlightScans.delete(tabId);
+  });
+
   ext.runtime.onMessage.addListener((message: RuntimeRequest, sender, sendResponse) => {
     void (async () => {
       switch (message.type) {
@@ -466,13 +835,58 @@ export default defineBackground(() => {
           return;
         }
 
+        case 'SAVE_GOOGLE_FACT_CHECK_API_KEY': {
+          const apiKey = message.apiKey.trim();
+          if (!apiKey) {
+            throw new Error('Google Fact Check API key cannot be empty.');
+          }
+          await saveGoogleFactCheckApiKey(apiKey);
+          sendResponse({ ok: true, hasGoogleFactCheckApiKey: true });
+          return;
+        }
+
         case 'GET_SETTINGS': {
-          sendResponse({ hasApiKey: await hasApiKey() });
+          sendResponse({
+            hasApiKey: await hasApiKey(),
+            hasGoogleFactCheckApiKey: await hasGoogleFactCheckApiKey(),
+          });
+          return;
+        }
+
+        case 'GET_EMBEDDED_PANEL_STATE': {
+          const senderTabId = typeof sender.tab?.id === 'number' ? sender.tab.id : undefined;
+          const tabId = await resolveStatusTabId(undefined, senderTabId);
+          if (!tabId) {
+            sendResponse({
+              tabId: null,
+              status: { state: 'idle', progress: 0, message: 'No active tab.', updatedAt: Date.now() },
+              report: null,
+            });
+            return;
+          }
+
+          const status = statusByTab.get(tabId) ?? {
+            tabId,
+            state: 'idle',
+            progress: 0,
+            message: 'Idle.',
+            updatedAt: Date.now(),
+          };
+          const report = await getReportForTab(tabId);
+          if (report) {
+            reportByTab.set(tabId, report);
+          }
+          sendResponse({
+            tabId,
+            status,
+            report: report ?? null,
+          });
           return;
         }
 
         case 'START_SCAN': {
-          const tabId = await resolveScannableTabId(message.tabId);
+          const senderTabId = typeof sender.tab?.id === 'number' ? sender.tab.id : undefined;
+          const tabId = await resolveScannableTabId(message.tabId ?? senderTabId);
           await clearFindingEvidenceForTab(tabId);
           setStatus(tabId, 'extracting', 'Preparing scan...', 0.05);
           void startScan(tabId);
@@ -481,7 +895,8 @@ export default defineBackground(() => {
         }
 
         case 'GET_SCAN_STATUS': {
-          const tabId = await resolveStatusTabId(message.tabId);
+          const senderTabId = typeof sender.tab?.id === 'number' ? sender.tab.id : undefined;
+          const tabId = await resolveStatusTabId(message.tabId, senderTabId);
           if (!tabId) {
             sendResponse({ state: 'idle', progress: 0, message: 'No active tab.' });
             return;
@@ -496,7 +911,10 @@ export default defineBackground(() => {
         }
 
         case 'GET_REPORT': {
-          const report = reportByTab.get(message.tabId) ?? (await getReport(message.tabId));
+          const report = await getReportForTab(message.tabId);
+          if (report) {
+            reportByTab.set(message.tabId, report);
+          }
           sendResponse({ report: report ?? null });
           return;
         }
@@ -556,6 +974,31 @@ export default defineBackground(() => {
             [message.findingId],
           );
           sendResponse({ ok: found });
+          return;
+        }
+
+        case 'GET_TRANSCRIPT': {
+          const senderTabId = typeof sender.tab?.id === 'number' ? sender.tab.id : undefined;
+          let targetTabId = message.tabId;
+          if (!targetTabId && senderTabId) {
+            try {
+              const senderTab = await ext.tabs.get(senderTabId);
+              if (typeof senderTab.url === 'string' && /^https?:\/\//i.test(senderTab.url)) {
+                targetTabId = senderTabId;
+              }
+            } catch {
+              // Ignore and fall back.
+            }
+          }
+          if (!targetTabId) {
+            try {
+              targetTabId = await resolveScannableTabId();
+            } catch {
+              targetTabId = undefined;
+            }
+          }
+          const result = await fetchTranscriptByVideoId(message.videoId, targetTabId);
+          sendResponse(result);
           return;
         }
 

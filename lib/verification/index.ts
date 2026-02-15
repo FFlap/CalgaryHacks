@@ -7,29 +7,79 @@ import {
 } from '@/lib/verification/googleFactCheck';
 import { searchGdeltArticles } from '@/lib/verification/gdelt';
 import { searchPubMed } from '@/lib/verification/pubmed';
-import { buildFindingQuery } from '@/lib/verification/query';
+import { buildFindingQuery, extractSearchKeywords } from '@/lib/verification/query';
 import { searchWikidata } from '@/lib/verification/wikidata';
 import { searchWikipedia } from '@/lib/verification/wikipedia';
+
+function buildQueryVariants(input: {
+  base: string;
+  quote: string;
+  correction?: string;
+}): string[] {
+  const variants = [
+    input.base,
+    extractSearchKeywords(input.quote),
+    input.correction ? extractSearchKeywords(input.correction) : '',
+  ]
+    .map((value) => value.trim())
+    .filter((value) => value.length >= 4);
+
+  return Array.from(new Set(variants)).slice(0, 3);
+}
+
+async function firstNonEmpty<T>(
+  queries: string[],
+  searcher: (query: string) => Promise<T[]>,
+): Promise<T[]> {
+  for (const query of queries) {
+    const rows = await searcher(query);
+    if (rows.length > 0) {
+      return rows;
+    }
+  }
+  return [];
+}
+
+async function searchFactChecksWithFallback(
+  queries: string[],
+  apiKey?: string | null,
+): Promise<{ configured: boolean; matches: FindingEvidence['factChecks'] }> {
+  let configured = hasGoogleFactCheckApiKey(apiKey);
+  for (const query of queries) {
+    const result = await searchGoogleFactChecks(query, apiKey);
+    configured = result.configured;
+    if (result.matches.length > 0) {
+      return result;
+    }
+  }
+  return { configured, matches: [] };
+}
 
 export async function buildFindingEvidence(input: {
   tabId: number;
   finding: Pick<Finding, 'id' | 'quote' | 'correction'>;
+  googleFactCheckApiKey?: string | null;
 }): Promise<FindingEvidence> {
   const query = buildFindingQuery(input.finding);
+  const queries = buildQueryVariants({
+    base: query,
+    quote: input.finding.quote,
+    correction: input.finding.correction,
+  });
 
   const [factChecksResult, wikipediaResult, wikidataResult, pubmedResult, gdeltResult] =
     await Promise.allSettled([
-      searchGoogleFactChecks(query),
-      searchWikipedia(query),
-      searchWikidata(query),
-      searchPubMed(query),
-      searchGdeltArticles(query),
+      searchFactChecksWithFallback(queries, input.googleFactCheckApiKey),
+      firstNonEmpty(queries, searchWikipedia),
+      firstNonEmpty(queries, searchWikidata),
+      firstNonEmpty(queries, searchPubMed),
+      firstNonEmpty(queries, searchGdeltArticles),
     ]);
 
   const factChecksPayload =
     factChecksResult.status === 'fulfilled'
       ? factChecksResult.value
-      : { configured: hasGoogleFactCheckApiKey(), matches: [] };
+      : { configured: hasGoogleFactCheckApiKey(input.googleFactCheckApiKey), matches: [] };
 
   const corroboration = {
     wikipedia: wikipediaResult.status === 'fulfilled' ? wikipediaResult.value : [],

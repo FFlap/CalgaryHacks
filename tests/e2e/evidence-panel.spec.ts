@@ -201,6 +201,15 @@ async function seedReport(popupPage: Page, tabId: number, findingId: string): Pr
   );
 }
 
+async function seedGoogleFactCheckApiKey(popupPage: Page): Promise<void> {
+  await popupPage.evaluate(async () => {
+    const runtimeChrome = (globalThis as any).chrome;
+    await runtimeChrome.storage.local.set({
+      google_fact_check_api_key: 'e2e-google-fact-check-key',
+    });
+  });
+}
+
 test('evidence panel loads trusted sources and reuses cached response across popup sessions', async () => {
   const launch = await launchExtensionContext();
   const { context, extensionId, userDataDir } = launch;
@@ -217,6 +226,7 @@ test('evidence panel loads trusted sources and reuses cached response across pop
     const tabId = await resolveExampleTabId(popupPage);
     const findingId = 'evidence-test-finding';
 
+    await seedGoogleFactCheckApiKey(popupPage);
     await seedReport(popupPage, tabId, findingId);
 
     await popupPage.close();
@@ -276,6 +286,7 @@ test('evidence panel tolerates provider failure and still renders remaining sour
     const tabId = await resolveExampleTabId(popupPage);
     const findingId = 'evidence-failure-finding';
 
+    await seedGoogleFactCheckApiKey(popupPage);
     await seedReport(popupPage, tabId, findingId);
 
     await popupPage.close();
