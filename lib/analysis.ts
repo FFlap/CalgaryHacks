@@ -117,11 +117,15 @@ function sanitizeCitations(
   return citations;
 }
 
-function buildCandidatePrompt(url: string, title: string, content: string): string {
+function buildCandidatePrompt(url: string, title: string, content: string, isTranscript = false): string {
+  const sourceNote = isTranscript
+    ? 'The content below is a YouTube video transcript (spoken word). Analyze it for problematic claims as spoken content.'
+    : 'Extract only concise, direct quotes from the page that are likely problematic.';
+  const textLabel = isTranscript ? 'TRANSCRIPT_TEXT' : 'PAGE_TEXT';
   return [
     'You are a strict claim miner focused on misinformation, fallacies, and bias.',
-    'Extract only concise, direct quotes from the page that are likely problematic.',
-    'Do not summarize the page.',
+    sourceNote,
+    'Do not summarize the content.',
     'Return valid JSON with this shape only:',
     '{"candidates":[{"quote":"string","issueHints":["misinformation"|"fallacy"|"bias"],"subtypeHint":"string optional","reason":"string optional"}]}',
     'Rules:',
@@ -131,9 +135,9 @@ function buildCandidatePrompt(url: string, title: string, content: string): stri
     '- issueHints can include multiple values.',
     `URL: ${url}`,
     `TITLE: ${title}`,
-    'PAGE_TEXT_START',
+    `${textLabel}_START`,
     content,
-    'PAGE_TEXT_END',
+    `${textLabel}_END`,
   ].join('\n');
 }
 
@@ -141,10 +145,15 @@ function buildVerificationPrompt(
   url: string,
   title: string,
   candidates: CandidateClaim[],
+  isTranscript = false,
 ): string {
+  const sourceNote = isTranscript
+    ? 'The quotes come from a YouTube video transcript (spoken word).'
+    : '';
   return [
     'You are a high-precision credibility analyst.',
     'Evaluate each quote for misinformation, logical fallacy, and rhetorical bias.',
+    sourceNote,
     'For misinformation: use web grounding and include only if highly likely false or misleading.',
     'For fallacy and bias: use quote-grounded reasoning only.',
     'Approved fallacy subtypes: straw man, ad hominem, false dilemma, hasty generalization, slippery slope, appeal to fear.',
@@ -158,7 +167,7 @@ function buildVerificationPrompt(
     `URL: ${url}`,
     `TITLE: ${title}`,
     `CANDIDATES_JSON: ${JSON.stringify(candidates)}`,
-  ].join('\n');
+  ].filter(Boolean).join('\n');
 }
 
 function coerceCandidates(payload: unknown): CandidateClaim[] {
@@ -351,11 +360,12 @@ export async function analyzeClaims(options: {
   text: string;
   truncated: boolean;
   analyzedChars: number;
+  isTranscript?: boolean;
 }): Promise<ScanReport> {
-  const { apiKey, tabId, url, title, text, truncated, analyzedChars } = options;
+  const { apiKey, tabId, url, title, text, truncated, analyzedChars, isTranscript = false } = options;
   const normalizedPageText = normalizeText(text);
 
-  const candidatePrompt = buildCandidatePrompt(url, title, text);
+  const candidatePrompt = buildCandidatePrompt(url, title, text, isTranscript);
   const candidateResponse = await callGeminiJson<{ candidates?: unknown }>({
     apiKey,
     prompt: candidatePrompt,
@@ -375,7 +385,7 @@ export async function analyzeClaims(options: {
     };
   }
 
-  const verificationPrompt = buildVerificationPrompt(url, title, candidates);
+  const verificationPrompt = buildVerificationPrompt(url, title, candidates, isTranscript);
   const verificationResponse = await callGeminiJson<{ findings?: unknown }>({
     apiKey,
     prompt: verificationPrompt,

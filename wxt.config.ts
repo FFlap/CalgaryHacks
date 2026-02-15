@@ -16,7 +16,11 @@ export default defineConfig({
   manifest: () => {
     const productionManifest = {
       permissions: ['activeTab', 'scripting', 'storage', 'tabs'],
-      host_permissions: ['https://generativelanguage.googleapis.com/*'],
+      host_permissions: [
+        'https://generativelanguage.googleapis.com/*',
+        'https://www.youtube.com/*',
+        'https://youtube.com/*',
+      ],
     };
 
     if (!isE2E) {

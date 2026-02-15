@@ -1,6 +1,7 @@
 import { analyzeClaims } from '@/lib/analysis';
 import { getApiKey, getReport, hasApiKey, saveApiKey, saveReport } from '@/lib/storage';
 import type { ExtractionResult, Finding, RuntimeRequest, ScanReport, ScanState, ScanStatus } from '@/lib/types';
+import { isYouTubeUrl, fetchYouTubeTranscript } from '@/lib/youtube';
 
 const MAX_ANALYSIS_CHARS = 60_000;
 
@@ -264,11 +265,38 @@ async function runScan(tabId: number): Promise<void> {
   }
 
   try {
-    setStatus(tabId, 'extracting', 'Collecting visible text from the page…', 0.15);
+    // Get the tab URL to check if it's a YouTube page
+    const tab = await ext.tabs.get(tabId);
+    const tabUrl = tab?.url ?? '';
+    const tabTitle = tab?.title ?? '';
 
-    const extraction = await executeOnTab<ExtractionResult>(tabId, extractVisibleTextInPage);
-    if (!extraction.text || extraction.text.length < 50) {
-      throw new Error('The page did not provide enough visible text to analyze.');
+    let extraction: ExtractionResult;
+    let isTranscript = false;
+
+    if (isYouTubeUrl(tabUrl)) {
+      // YouTube page — fetch the transcript instead of visible text
+      setStatus(tabId, 'extracting', 'Fetching YouTube transcript…', 0.15);
+
+      const { text, videoId } = await fetchYouTubeTranscript(tabUrl);
+      if (!text || text.length < 50) {
+        throw new Error('The YouTube transcript is too short to analyze.');
+      }
+
+      extraction = {
+        url: tabUrl,
+        title: tabTitle,
+        lang: 'en',
+        text,
+        charCount: text.length,
+      };
+      isTranscript = true;
+    } else {
+      // Regular page — extract visible text
+      setStatus(tabId, 'extracting', 'Collecting visible text from the page…', 0.15);
+      extraction = await executeOnTab<ExtractionResult>(tabId, extractVisibleTextInPage);
+      if (!extraction.text || extraction.text.length < 50) {
+        throw new Error('The page did not provide enough visible text to analyze.');
+      }
     }
 
     const truncatedText = extraction.text.slice(0, MAX_ANALYSIS_CHARS);
@@ -283,21 +311,24 @@ async function runScan(tabId: number): Promise<void> {
       text: truncatedText,
       truncated,
       analyzedChars: truncatedText.length,
+      isTranscript,
     });
 
-    setStatus(tabId, 'highlighting', 'Placing inline evidence highlights…', 0.82);
+    if (!isTranscript) {
+      setStatus(tabId, 'highlighting', 'Placing inline evidence highlights…', 0.82);
 
-    const highlightResult = await executeOnTab<{ appliedIds: string[]; appliedCount: number }>(
-      tabId,
-      applyHighlightsInPage,
-      [report.findings.map(({ id, quote, issueTypes, severity }) => ({ id, quote, issueTypes, severity }))],
-    );
+      const highlightResult = await executeOnTab<{ appliedIds: string[]; appliedCount: number }>(
+        tabId,
+        applyHighlightsInPage,
+        [report.findings.map(({ id, quote, issueTypes, severity }) => ({ id, quote, issueTypes, severity }))],
+      );
 
-    const appliedIdSet = new Set(highlightResult.appliedIds);
-    report.findings = report.findings.map((finding) => ({
-      ...finding,
-      highlightApplied: appliedIdSet.has(finding.id),
-    }));
+      const appliedIdSet = new Set(highlightResult.appliedIds);
+      report.findings = report.findings.map((finding) => ({
+        ...finding,
+        highlightApplied: appliedIdSet.has(finding.id),
+      }));
+    }
 
     reportByTab.set(tabId, report);
     await saveReport(tabId, report);
@@ -351,7 +382,7 @@ export default defineBackground(() => {
           return;
         }
 
-      case 'START_SCAN': {
+        case 'START_SCAN': {
           const tabId = await resolveScannableTabId(message.tabId);
           setStatus(tabId, 'extracting', 'Preparing scan…', 0.05);
           void startScan(tabId);
