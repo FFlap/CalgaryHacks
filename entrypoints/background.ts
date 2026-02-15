@@ -28,16 +28,31 @@ import type {
 import { fetchTranscript } from 'youtube-transcript-plus';
 import { formatTimeLabel, normalizeTranscriptSegments, validateTranscriptSegments } from '@/lib/youtube-transcript';
 
+/**
+ * Background runtime orchestrator.
+ *
+ * Responsibilities:
+ * - Own scan lifecycle state for each tab.
+ * - Execute DOM operations via `scripting.executeScript`.
+ * - Bridge popup/content requests to analysis, transcript, and evidence services.
+ * - Persist tab-scoped artifacts (status/report/evidence) through storage helpers.
+ */
 const MAX_ANALYSIS_CHARS = 60_000;
 
+// Browser API compatibility shim for Chromium (`chrome`) and Firefox (`browser`) style globals.
 const ext = ((globalThis as any).browser ?? (globalThis as any).chrome) as typeof browser;
 
+// In-memory hot caches keyed by tab id.
+// These keep popup interactions responsive without needing storage round-trips on every request.
 const statusByTab = new Map<number, ScanStatus>();
 const reportByTab = new Map<number, ScanReport>();
+// One-time "focus this finding when popup opens" handoff.
 const focusedFindingByTab = new Map<number, string>();
+// Deduplicate concurrent scans/evidence generation per scope.
 const inFlightScans = new Map<number, Promise<void>>();
 const inFlightEvidence = new Map<string, Promise<FindingEvidence>>();
 
+// Parses strict YouTube watch URLs and returns the `v` id when present.
 function parseYouTubeVideoId(url: string): string | undefined {
   try {
     const parsed = new URL(url);
@@ -59,10 +74,12 @@ function isYouTubeWatchUrl(url: string): boolean {
   return parseYouTubeVideoId(url) !== undefined;
 }
 
+// Returns from memory cache first, then storage fallback.
 async function getReportForTab(tabId: number): Promise<ScanReport | null> {
   return reportByTab.get(tabId) ?? (await getReport(tabId));
 }
 
+// Pushes status/report deltas to the embedded content-panel if it exists on this tab.
 function notifyEmbeddedPanel(tabId: number) {
   const status = statusByTab.get(tabId);
   if (!status) return;
@@ -91,6 +108,8 @@ function setStatus(tabId: number, state: ScanState, message: string, progress: n
   notifyEmbeddedPanel(tabId);
 }
 
+// Resolve a "real" scannable tab from the current window.
+// Prefers active tab, falls back to most recently accessed HTTP(S) tab.
 async function getActiveTabId(): Promise<number> {
   const [activeTab] = await ext.tabs.query({ active: true, currentWindow: true });
   const activeUrl = activeTab?.url ?? '';
@@ -109,6 +128,7 @@ async function getActiveTabId(): Promise<number> {
   return scannable[0].id;
 }
 
+// Prefer an explicitly requested tab id when valid; otherwise defer to active-tab heuristics.
 async function resolveScannableTabId(preferredTabId?: number): Promise<number> {
   if (preferredTabId) {
     try {
@@ -123,6 +143,7 @@ async function resolveScannableTabId(preferredTabId?: number): Promise<number> {
   return getActiveTabId();
 }
 
+// Removes injected highlight marks and restores plain text nodes.
 function clearHighlightsInPage() {
   const marks = Array.from(document.querySelectorAll('mark[data-cred-id]'));
   for (const mark of marks) {
@@ -133,8 +154,17 @@ function clearHighlightsInPage() {
   }
 }
 
+/**
+ * Injects highlight marks for findings in the page DOM.
+ *
+ * Matching strategy:
+ * - Try exact quote match first.
+ * - Fall back to normalized quote variants to survive punctuation/whitespace drift.
+ * - Skip tiny/blocked text nodes to avoid low-signal matches.
+ */
 function applyHighlightsInPage(findings: Array<Pick<Finding, 'id' | 'quote' | 'issueTypes' | 'severity'>>) {
   const styleId = 'cred-highlight-style';
+  // Defensive reset so repeated scans do not nest/duplicate mark tags.
   const clearHighlights = () => {
     const marks = Array.from(document.querySelectorAll('mark[data-cred-id]'));
     for (const mark of marks) {
@@ -178,6 +208,7 @@ function applyHighlightsInPage(findings: Array<Pick<Finding, 'id' | 'quote' | 'i
 
   const blockedTags = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEXTAREA', 'CODE', 'PRE']);
   const runtimeChrome = (globalThis as any).chrome;
+  // Guard to ensure click bridge is installed once per page lifetime.
   const clickBridgeKey = '__credHighlightClickBridgeInstalled';
   const entityMap: Record<string, string> = {
     '&amp;': '&',
@@ -189,6 +220,7 @@ function applyHighlightsInPage(findings: Array<Pick<Finding, 'id' | 'quote' | 'i
   };
 
   if (!(window as any)[clickBridgeKey]) {
+    // Capture-phase listener ensures clicks are seen even inside complex site handlers.
     document.addEventListener(
       'click',
       (event) => {
@@ -208,6 +240,7 @@ function applyHighlightsInPage(findings: Array<Pick<Finding, 'id' | 'quote' | 'i
 
   const decodeHtmlEntities = (input: string) => {
     let value = input;
+    // Re-run a few times to handle nested-encoded entities without risking unbounded loops.
     for (let i = 0; i < 3; i += 1) {
       const next = value
         .replace(/&(amp|quot|#39|apos|lt|gt);/gi, (entity) => entityMap[entity.toLowerCase()] ?? entity)
@@ -232,6 +265,7 @@ function applyHighlightsInPage(findings: Array<Pick<Finding, 'id' | 'quote' | 'i
     let previousWasSpace = true;
 
     for (let index = 0; index < input.length; index += 1) {
+      // Keep alphanumerics, collapse other runs into a single space.
       const char = input[index];
       if (/\w/.test(char)) {
         normalized += char.toLowerCase();
@@ -267,6 +301,7 @@ function applyHighlightsInPage(findings: Array<Pick<Finding, 'id' | 'quote' | 'i
     variants.add(decoded);
     variants.add(decoded.replace(/[“”"'`]+/g, '').trim());
 
+    // Build shorter prefixes for resilient matching when quotes are long or lightly transformed by page HTML.
     const words = normalizeForMatch(decoded).normalized.split(' ').filter(Boolean);
     if (words.length >= 6) {
       variants.add(words.slice(0, Math.min(12, words.length)).join(' '));
@@ -283,6 +318,7 @@ function applyHighlightsInPage(findings: Array<Pick<Finding, 'id' | 'quote' | 'i
     const wantedNormalized = normalizeForMatch(wantedRaw).normalized;
     if (!wantedNormalized) return null;
 
+    // Walk text nodes only; this avoids markup-level false positives.
     const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
       acceptNode(node) {
         const parent = node.parentElement;
@@ -299,6 +335,7 @@ function applyHighlightsInPage(findings: Array<Pick<Finding, 'id' | 'quote' | 'i
       const haystack = current.textContent ?? '';
       const haystackLower = haystack.toLowerCase();
 
+      // Fast path for direct substring match in raw node text.
       const exactStart = haystackLower.indexOf(wantedRaw);
       if (exactStart !== -1) {
         return {
@@ -308,6 +345,7 @@ function applyHighlightsInPage(findings: Array<Pick<Finding, 'id' | 'quote' | 'i
         };
       }
 
+      // Fallback path for punctuation/whitespace tolerant matching.
       const normalizedHaystack = normalizeForMatch(haystack);
       const normalizedStart = normalizedHaystack.normalized.indexOf(wantedNormalized);
       if (normalizedStart !== -1) {
@@ -332,11 +370,13 @@ function applyHighlightsInPage(findings: Array<Pick<Finding, 'id' | 'quote' | 'i
 
   for (const finding of findings) {
     const quote = finding.quote.trim();
+    // Very short snippets are often too ambiguous for reliable inline placement.
     if (quote.length < 22) continue;
 
     const shortNeedle = quote.length > 220 ? quote.slice(0, 220) : quote;
     const variants = buildNeedleVariants(shortNeedle);
     let match: { node: Text; start: number; end: number } | null = null;
+    // Try progressively weaker variants until one lands.
     for (const variant of variants) {
       match = findTextMatch(variant);
       if (match) break;
@@ -365,10 +405,12 @@ function applyHighlightsInPage(findings: Array<Pick<Finding, 'id' | 'quote' | 'i
   return { appliedIds, appliedCount: appliedIds.length };
 }
 
+// Scrolls to an injected highlight and briefly accents it.
 function scrollToHighlightInPage(findingId: string) {
-  const target = document.querySelector<HTMLElement>(`mark[data-cred-id="${CSS.escape(findingId)}"]`);
+  const marks = Array.from(document.querySelectorAll<HTMLElement>('mark[data-cred-id]'));
+  const target = marks.find((mark) => mark.dataset.credId === findingId);
   if (!target) return false;
-  target.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  target.scrollIntoView({ behavior: 'auto', block: 'center' });
   target.classList.add('cred-pulse');
   target.style.outline = '2px solid rgba(228,72,42,.65)';
   setTimeout(() => {
@@ -378,6 +420,7 @@ function scrollToHighlightInPage(findingId: string) {
   return true;
 }
 
+// Video equivalent of "jump to finding" for transcript-based reports.
 function seekVideoToTimestampInPage(timestampSec: number) {
   if (!Number.isFinite(timestampSec) || timestampSec < 0) return false;
   const video = document.querySelector<HTMLVideoElement>('video');
@@ -388,6 +431,14 @@ function seekVideoToTimestampInPage(timestampSec: number) {
   return true;
 }
 
+/**
+ * Collects high-signal visible text from the current page.
+ *
+ * Heuristics prioritize article-like content while suppressing:
+ * - navigation/chrome sections
+ * - sponsored/advertisement fragments
+ * - short/noisy/link-dense blocks
+ */
 function extractVisibleTextInPage(): ExtractionResult {
   const blockedTags = new Set([
     'SCRIPT',
@@ -408,6 +459,7 @@ function extractVisibleTextInPage(): ExtractionResult {
   const markerCache = new WeakMap<Element, boolean>();
   const linkDensityCache = new WeakMap<Element, boolean>();
 
+  // Shared text normalization for dedupe and scoring.
   const normalizeText = (value: string): string => value.replace(/\s+/g, ' ').trim();
 
   const isVisible = (element: Element | null): boolean => {
@@ -419,6 +471,7 @@ function extractVisibleTextInPage(): ExtractionResult {
     return true;
   };
 
+  // Detect ad/sidebar/footer style containers by semantic markers and class/id hints.
   const hasNoiseMarker = (element: Element): boolean => {
     const cached = markerCache.get(element);
     if (typeof cached === 'boolean') {
@@ -447,6 +500,7 @@ function extractVisibleTextInPage(): ExtractionResult {
     return flagged;
   };
 
+  // Link-heavy containers are usually nav/related-story modules rather than body content.
   const isLinkDense = (container: Element): boolean => {
     const cached = linkDensityCache.get(container);
     if (typeof cached === 'boolean') {
@@ -470,6 +524,7 @@ function extractVisibleTextInPage(): ExtractionResult {
     return dense;
   };
 
+  // Node-level gate used by the text walker.
   const shouldSkipNode = (node: Node): boolean => {
     const parent = (node as Text).parentElement;
     if (!parent) return true;
@@ -496,6 +551,7 @@ function extractVisibleTextInPage(): ExtractionResult {
     return false;
   };
 
+  // Collect unique normalized lines from a candidate root.
   const collectBlocks = (root: Element, maxBlocks = 1200): string[] => {
     const seen = new Set<string>();
     const blocks: string[] = [];
@@ -524,6 +580,7 @@ function extractVisibleTextInPage(): ExtractionResult {
     return blocks;
   };
 
+  // Favors roots with more natural language density.
   const scoreBlocks = (blocks: string[]): number => {
     if (blocks.length === 0) return 0;
     const joined = blocks.join(' ');
@@ -532,6 +589,7 @@ function extractVisibleTextInPage(): ExtractionResult {
     return charCount + punctuationCount * 12 + blocks.length * 18;
   };
 
+  // Candidate roots ordered from specific article selectors to generic main/body fallbacks.
   const collectRootCandidates = (): Element[] => {
     const selectors = [
       '[itemprop="articleBody"]',
@@ -578,6 +636,7 @@ function extractVisibleTextInPage(): ExtractionResult {
   let chosenBlocks: string[] = [];
   let bestScore = 0;
 
+  // Select best root by heuristic score, then expand extraction window from that root.
   for (const candidate of candidates) {
     const blocks = collectBlocks(candidate, 320);
     const score = scoreBlocks(blocks);
@@ -613,6 +672,7 @@ async function executeOnTab<T>(
   args: any[] = [],
   world: 'ISOLATED' | 'MAIN' = 'ISOLATED',
 ): Promise<T> {
+  // Centralized wrapper for script injection so all call sites share the same error semantics.
   const [result] = await ext.scripting.executeScript({
     target: { tabId },
     func,
@@ -627,6 +687,13 @@ async function executeOnTab<T>(
   return result.result as T;
 }
 
+/**
+ * Retrieves and normalizes YouTube transcript segments.
+ *
+ * Two fetch modes:
+ * - Tab context (`runTabFetch`): preserves page session/cookies when needed.
+ * - Extension context (`extensionFetch`): fallback when tab context is unavailable.
+ */
 async function fetchTranscriptByVideoId(
   videoId: string,
   tabId?: number,
@@ -641,6 +708,7 @@ async function fetchTranscriptByVideoId(
     headers?: Record<string, string>;
     lang?: string;
   }): Promise<Response> => {
+    // Some transcript endpoints need first-party page context to succeed consistently.
     if (!tabId) {
       throw new Error('No YouTube tab context available for transcript fetch.');
     }
@@ -653,6 +721,7 @@ async function fetchTranscriptByVideoId(
     }>(
       tabId,
       async (request) => {
+        // Explicitly avoid overriding restricted headers like User-Agent.
         const safeHeaders = new Headers(request.headers ?? {});
         safeHeaders.delete('User-Agent');
         if (request.lang && !safeHeaders.has('Accept-Language')) {
@@ -691,6 +760,7 @@ async function fetchTranscriptByVideoId(
     body?: string;
     headers?: Record<string, string>;
   }): Promise<Response> => {
+    // Same header hygiene as tab fetch, but from extension background context.
     const safeHeaders = new Headers(params.headers ?? {});
     safeHeaders.delete('User-Agent');
     if (params.lang && !safeHeaders.has('Accept-Language')) {
@@ -714,6 +784,7 @@ async function fetchTranscriptByVideoId(
     body?: string;
     headers?: Record<string, string>;
   }): Promise<Response> => {
+    // Library hook contract: choose tab-bound fetch when tab id exists.
     const normalized = {
       ...params,
       method: params.method ?? 'GET',
@@ -725,6 +796,7 @@ async function fetchTranscriptByVideoId(
   };
 
   let lastError: string | undefined;
+  // Retry across preferred language, english fallback, then provider default.
   for (const lang of [...languageAttempts, undefined]) {
     try {
       const rawSegments = await fetchTranscript(videoId, {
@@ -740,6 +812,7 @@ async function fetchTranscriptByVideoId(
           text: segment.text,
         })),
       );
+      // Reject malformed segments to keep downstream timestamp logic safe.
       const validation = validateTranscriptSegments(segments);
       if (!validation.ok) {
         lastError = `Transcript validation failed (${validation.reason ?? 'invalid_segments'}).`;
@@ -769,6 +842,7 @@ async function runScan(tabId: number): Promise<void> {
   }
 
   try {
+    // Phase 1: collect page-visible text context.
     await clearFindingEvidenceForTab(tabId);
     setStatus(tabId, 'extracting', 'Collecting visible text from the page...', 0.15);
 
@@ -784,6 +858,7 @@ async function runScan(tabId: number): Promise<void> {
     let analysisText = extraction.text;
 
     if (youtubeMode) {
+      // Phase 2a (YouTube): transcript-first analysis path.
       setStatus(tabId, 'extracting', 'Collecting YouTube transcript...', 0.2);
       if (!videoId) {
         setStatus(tabId, 'error', 'Missing YouTube video id.', 1, 'invalid_video_id');
@@ -792,6 +867,7 @@ async function runScan(tabId: number): Promise<void> {
 
       const transcript = await fetchTranscriptByVideoId(videoId, tabId);
       if (!transcript.ok || !transcript.segments || transcript.segments.length === 0) {
+        // Persist an explicit empty-report envelope so UI can render graceful "unavailable" state.
         const report: ScanReport = {
           tabId,
           url: extraction.url,
@@ -832,10 +908,12 @@ async function runScan(tabId: number): Promise<void> {
       analysisText = transcriptSegments.map((segment) => `[${segment.startLabel}] ${segment.text}`).join('\n');
     }
 
+    // Keep model input bounded for predictable latency and token cost.
     const truncatedText = analysisText.slice(0, MAX_ANALYSIS_CHARS);
     const truncated = analysisText.length > MAX_ANALYSIS_CHARS;
 
     setStatus(tabId, 'analyzing', 'Analyzing claims with OpenRouter Trinity...', 0.55);
+    // Phase 3: LLM analysis.
     let report = await analyzeClaims({
       apiKey,
       tabId,
@@ -848,6 +926,7 @@ async function runScan(tabId: number): Promise<void> {
     });
 
     if (youtubeMode) {
+      // Keep transcript metadata on final report for timestamp jumping and transcript rendering.
       report = {
         ...report,
         scanKind: 'youtube_video',
@@ -858,6 +937,7 @@ async function runScan(tabId: number): Promise<void> {
         },
       };
     } else {
+      // Phase 2b (web articles): map findings back to page text via inline marks.
       setStatus(tabId, 'highlighting', 'Placing inline evidence highlights...', 0.82);
       const highlightResult = await executeOnTab<{ appliedIds: string[]; appliedCount: number }>(
         tabId,
@@ -866,12 +946,14 @@ async function runScan(tabId: number): Promise<void> {
       );
 
       const appliedIdSet = new Set(highlightResult.appliedIds);
+      // Mark which findings were successfully anchored in-page.
       report.findings = report.findings.map((finding) => ({
         ...finding,
         highlightApplied: appliedIdSet.has(finding.id),
       }));
     }
 
+    // Phase 4: persist and publish final state to popup/content.
     reportByTab.set(tabId, report);
     await saveReport(tabId, report);
     await clearFindingEvidenceForTab(tabId);
@@ -886,6 +968,7 @@ async function runScan(tabId: number): Promise<void> {
 }
 
 async function startScan(tabId: number) {
+  // Prevent duplicate scan runs on the same tab.
   const active = inFlightScans.get(tabId);
   if (active) {
     return;
@@ -899,6 +982,7 @@ async function startScan(tabId: number) {
 }
 
 async function resolveStatusTabId(preferred?: number, senderTabId?: number): Promise<number | undefined> {
+  // Status requests may come from popup or content script with different tab visibility contexts.
   if (preferred) return preferred;
   if (senderTabId) return senderTabId;
   try {
@@ -914,6 +998,7 @@ function evidenceJobKey(tabId: number, findingId: string): string {
 
 const EVIDENCE_CACHE_MAX_AGE_MS = 10 * 60 * 1000;
 
+// GDELT frequently rate-limits; these known transient failures should not dominate the UI state.
 function shouldSuppressGdeltError(message: string): boolean {
   const normalized = message.toLowerCase();
   return (
@@ -927,6 +1012,7 @@ async function sanitizeCachedEvidence(
   findingId: string,
   evidence: FindingEvidence,
 ): Promise<FindingEvidence> {
+  // Normalize stale/expected transient provider errors inside cached payloads.
   const gdeltError = evidence.errors.gdelt;
   if (!gdeltError || !shouldSuppressGdeltError(gdeltError)) {
     return evidence;
@@ -944,6 +1030,7 @@ async function sanitizeCachedEvidence(
 }
 
 function isEvidenceStale(evidence: FindingEvidence): boolean {
+  // Missing/bad timestamps are treated as stale to force safe refresh behavior.
   const generatedAt = Date.parse(evidence.generatedAt);
   if (!Number.isFinite(generatedAt)) {
     return true;
@@ -969,6 +1056,7 @@ async function resolveFindingEvidence(options: {
   }
 
   if (!forceRefresh) {
+    // Fast-path cached evidence when still fresh.
     const cached = await getFindingEvidence(tabId, findingId);
     if (cached) {
       if (!isEvidenceStale(cached)) {
@@ -980,6 +1068,7 @@ async function resolveFindingEvidence(options: {
   const key = evidenceJobKey(tabId, findingId);
   const existingJob = inFlightEvidence.get(key);
   if (existingJob) {
+    // Share a single in-flight promise across duplicate requests.
     return existingJob;
   }
 
@@ -1009,6 +1098,7 @@ async function resolveFindingEvidence(options: {
 }
 
 export default defineBackground(() => {
+  // Keep tab-scoped memory clean when a tab is closed.
   ext.tabs.onRemoved.addListener((tabId) => {
     statusByTab.delete(tabId);
     reportByTab.delete(tabId);
@@ -1017,6 +1107,7 @@ export default defineBackground(() => {
   });
 
   ext.runtime.onMessage.addListener((message: RuntimeRequest, sender, sendResponse) => {
+    // Async router pattern: return true below to keep message channel alive for async replies.
     void (async () => {
       switch (message.type) {
         case 'SAVE_API_KEY': {
@@ -1048,6 +1139,7 @@ export default defineBackground(() => {
         }
 
         case 'GET_EMBEDDED_PANEL_STATE': {
+          // Embedded panel can request state without knowing target tab upfront.
           const senderTabId = typeof sender.tab?.id === 'number' ? sender.tab.id : undefined;
           const tabId = await resolveStatusTabId(undefined, senderTabId);
           if (!tabId) {
@@ -1079,6 +1171,7 @@ export default defineBackground(() => {
         }
 
         case 'START_SCAN': {
+          // Start is fire-and-forget for scan body; immediate ACK keeps popup responsive.
           const senderTabId = typeof sender.tab?.id === 'number' ? sender.tab.id : undefined;
           const tabId = await resolveScannableTabId(message.tabId ?? senderTabId);
           await clearFindingEvidenceForTab(tabId);
@@ -1114,6 +1207,7 @@ export default defineBackground(() => {
         }
 
         case 'GET_FINDING_EVIDENCE': {
+          // Evidence resolution handles freshness, dedupe, and provider fanout internally.
           const evidence = await resolveFindingEvidence({
             tabId: message.tabId,
             findingId: message.findingId,
@@ -1133,6 +1227,7 @@ export default defineBackground(() => {
         }
 
         case 'OPEN_POPUP_FOR_FINDING': {
+          // Called from content-page highlight clicks to route focus back into popup.
           const tabId =
             message.tabId ??
             (typeof sender.tab?.id === 'number' ? sender.tab.id : undefined);
@@ -1162,6 +1257,9 @@ export default defineBackground(() => {
         }
 
         case 'JUMP_TO_FINDING': {
+          // Two jump modes:
+          // - YouTube finding with timestamp => seek video.
+          // - Standard finding => scroll to injected mark.
           const report = await getReportForTab(message.tabId);
           const finding = report?.findings.find((item) => item.id === message.findingId);
           const canSeekVideo =
@@ -1189,6 +1287,7 @@ export default defineBackground(() => {
         }
 
         case 'GET_TRANSCRIPT': {
+          // Utility endpoint used by popup/content for transcript-only fetches.
           const senderTabId = typeof sender.tab?.id === 'number' ? sender.tab.id : undefined;
           let targetTabId = message.tabId;
           if (!targetTabId && senderTabId) {
@@ -1219,10 +1318,12 @@ export default defineBackground(() => {
         }
       }
     })().catch((error) => {
+      // Convert uncaught background errors into structured runtime responses.
       const messageText = error instanceof Error ? error.message : 'Unknown background error.';
       sendResponse({ ok: false, error: messageText });
     });
 
+    // Explicitly keep message channel open for async `sendResponse` usage.
     return true;
   });
 });

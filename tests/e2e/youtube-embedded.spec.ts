@@ -101,6 +101,33 @@ test('YouTube embedded panel renders transcript and seeks on timestamp/text clic
     await expect(page.getByTestId('yt-bias-panel')).toBeVisible({ timeout: 25_000 });
     await expect(page.getByTestId('yt-findings-list')).toBeVisible();
     await expect(page.getByTestId('yt-transcript-row').first()).toBeVisible();
+    await expect
+      .poll(async () => page!.getByTestId('yt-timeline-marker').count(), {
+        timeout: 25_000,
+      })
+      .toBe(2);
+    const markerIssueTypes = await page
+      .getByTestId('yt-timeline-marker')
+      .evaluateAll((nodes) =>
+        nodes.map((node) => (node as HTMLElement).dataset.issueTypes ?? ''),
+      );
+    const markerRanges = await page
+      .getByTestId('yt-timeline-marker')
+      .evaluateAll((nodes) =>
+        nodes.map((node) => {
+          const element = node as HTMLElement;
+          return {
+            start: Number(element.dataset.startSec ?? '0'),
+            end: Number(element.dataset.endSec ?? '0'),
+          };
+        }),
+      );
+    expect(markerRanges.length).toBe(2);
+    for (const markerRange of markerRanges) {
+      expect(markerRange.end).toBeGreaterThan(markerRange.start);
+    }
+    expect(markerIssueTypes.some((value) => value.includes('bias') && value.includes('fallacy'))).toBeTruthy();
+    expect(markerIssueTypes.some((value) => value.includes('misinformation'))).toBeTruthy();
     const mountMeta = await page.evaluate(() => {
       const panel = document.querySelector('[data-testid="yt-bias-panel"]');
       return {
