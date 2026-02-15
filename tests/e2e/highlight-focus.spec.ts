@@ -177,6 +177,7 @@ test('click-origin focus routing surfaces reasoning in popup', async () => {
     await expect(focusedCard.getByTestId('finding-rationale')).toContainText(
       'Test rationale from highlight click flow.',
     );
+    await focusedCard.getByTestId('load-evidence').click();
     await expect(focusedCard.getByTestId('evidence-content')).toBeVisible();
     await expect(focusedCard.getByTestId('factcheck-list')).toContainText('PolitiFact');
   } finally {

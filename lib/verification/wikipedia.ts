@@ -35,6 +35,12 @@ interface WikipediaResponse {
   };
 }
 
+interface WikipediaSearchContext {
+  topicTerms?: string[];
+  entityTerms?: string[];
+  intent?: 'misinformation' | 'argumentation';
+}
+
 function stripHtml(input: string): string {
   return input.replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
 }
@@ -163,7 +169,30 @@ function relevanceScore(title: string, snippet: string, terms: string[]): number
   return score;
 }
 
-export async function searchWikipedia(query: string): Promise<CorroborationItem[]> {
+function topicOverlapScore(haystack: string, topicTerms: string[]): number {
+  let hits = 0;
+  for (const term of topicTerms) {
+    if (haystack.includes(term.toLowerCase())) {
+      hits += 1;
+    }
+  }
+  return hits;
+}
+
+function entityOverlapScore(haystack: string, entityTerms: string[]): number {
+  let hits = 0;
+  for (const entity of entityTerms) {
+    if (haystack.includes(entity.toLowerCase())) {
+      hits += 1;
+    }
+  }
+  return hits;
+}
+
+export async function searchWikipedia(
+  query: string,
+  context?: WikipediaSearchContext,
+): Promise<CorroborationItem[]> {
   const { apiQuery, terms } = buildWikipediaSearchQuery(query);
 
   const params = new URLSearchParams({
@@ -182,23 +211,56 @@ export async function searchWikipedia(query: string): Promise<CorroborationItem[
   });
 
   const results = Array.isArray(json.query?.search) ? json.query.search : [];
+  const topicTerms = context?.topicTerms ?? [];
+  const entityTerms = context?.entityTerms ?? [];
+
   const scored = results
     .map((item) => {
       const title = String(item.title ?? 'Wikipedia page').trim();
       const snippet = stripHtml(String(item.snippet ?? '').trim());
-      const score = relevanceScore(title, snippet, terms);
+      const combinedLower = `${title} ${snippet}`.toLowerCase();
+      const topicHits = topicOverlapScore(combinedLower, topicTerms);
+      const entityHits = entityOverlapScore(combinedLower, entityTerms);
+
+      let score = relevanceScore(title, snippet, terms);
+      score += topicHits * 4;
+      score += entityHits;
+
+      const titleIsEntity = entityTerms.some(
+        (entity) => entity.toLowerCase() === title.toLowerCase(),
+      );
+      if (topicTerms.length >= 2 && topicHits === 0 && entityHits > 0) {
+        score -= 6;
+      }
+      if (titleIsEntity && topicHits === 0) {
+        score -= 4;
+      }
+      if (/\\b(host|comedian|actor|singer|podcast)\\b/i.test(snippet) && topicHits === 0) {
+        score -= 3;
+      }
+
       return {
         title,
         snippet,
         url: `https://en.wikipedia.org/?curid=${String(item.pageid ?? '')}`,
         source: 'Wikipedia' as const,
         score,
+        topicHits,
       };
     })
     .sort((left, right) => right.score - left.score);
 
   const minOverlapScore = terms.length >= 5 ? 6 : 3;
-  const filtered = scored.filter((item) => item.score >= minOverlapScore);
+  const filtered = scored.filter((item) => {
+    if (topicTerms.length >= 2) {
+      return item.topicHits >= 1 || item.score >= minOverlapScore + 3;
+    }
+    return item.score >= minOverlapScore;
+  });
+  if (filtered.length === 0 && topicTerms.length >= 2) {
+    return [];
+  }
+
   const finalRows = (filtered.length > 0 ? filtered : scored).slice(0, MAX_FINAL_RESULTS);
 
   return finalRows.map(({ title, snippet, url, source }) => ({

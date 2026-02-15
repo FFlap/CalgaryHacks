@@ -235,6 +235,7 @@ test('evidence panel loads trusted sources and reuses cached response across pop
     await popupPage.locator(`[data-finding-id="${findingId}"] .finding-summary`).click();
 
     const focusedCard = popupPage.locator(`[data-finding-id="${findingId}"]`);
+    await focusedCard.getByTestId('load-evidence').click();
     await expect(focusedCard.getByTestId('evidence-content')).toBeVisible();
     await expect(focusedCard.getByTestId('evidence-status-pill')).toContainText('Contradicted');
     await expect(focusedCard.getByTestId('factcheck-list')).toContainText('PolitiFact');
@@ -253,6 +254,7 @@ test('evidence panel loads trusted sources and reuses cached response across pop
     await popupPage.locator(`[data-finding-id="${findingId}"] .finding-summary`).click();
 
     const cachedCard = popupPage.locator(`[data-finding-id="${findingId}"]`);
+    await cachedCard.getByTestId('load-evidence').click();
     await expect(cachedCard.getByTestId('evidence-content')).toBeVisible();
     await expect(cachedCard.getByTestId('factcheck-list')).toContainText('PolitiFact');
 
@@ -295,6 +297,7 @@ test('evidence panel tolerates provider failure and still renders remaining sour
     await popupPage.locator(`[data-finding-id="${findingId}"] .finding-summary`).click();
 
     const card = popupPage.locator(`[data-finding-id="${findingId}"]`);
+    await card.getByTestId('load-evidence').click();
     await expect(card.getByTestId('evidence-content')).toBeVisible();
     await expect(card.getByTestId('factcheck-list')).toContainText('PolitiFact');
     await expect(card.getByTestId('gdelt-list')).toContainText('Related reporting article');

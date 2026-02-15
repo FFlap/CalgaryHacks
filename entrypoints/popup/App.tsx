@@ -627,7 +627,7 @@ function FindingCard({
                 className="h-7 text-xs"
                 data-testid="load-evidence"
               >
-                Load trusted sources
+                Find trusted sources
               </Button>
             )}
 
@@ -997,11 +997,6 @@ function App() {
 
     return () => clearTimeout(timer);
   }, [focusedFindingId, report]);
-
-  useEffect(() => {
-    if (!expandedId) return;
-    void loadFindingEvidence(expandedId);
-  }, [expandedId, loadFindingEvidence]);
 
   /* ---- actions ---- */
 
