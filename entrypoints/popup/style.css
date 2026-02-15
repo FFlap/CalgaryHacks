@@ -142,6 +142,42 @@
   color: var(--foreground);
 }
 
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.rescan-trigger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  height: 28px;
+  padding: 0 9px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--card);
+  color: var(--muted-foreground);
+  cursor: pointer;
+  font-size: 0.62rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  transition: all 0.15s ease;
+}
+
+.rescan-trigger:hover:not(:disabled) {
+  background: var(--accent);
+  color: var(--foreground);
+  border-color: oklch(0.82 0.015 72);
+}
+
+.rescan-trigger:disabled {
+  opacity: 0.58;
+  cursor: default;
+}
+
 .settings-trigger {
   display: flex;
   align-items: center;

@@ -4,6 +4,7 @@ import {
   Gauge,
   KeyRound,
   LoaderCircle,
+  RotateCcw,
   Search,
   Settings,
   ShieldCheck,
@@ -20,7 +21,6 @@ import {
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import type {
-  CorroborationItem,
   Finding,
   FindingEvidence,
   IssueType,
@@ -169,19 +169,85 @@ function formatEvidenceDate(dateValue?: string) {
   });
 }
 
-function renderCorroborationRows(rows: CorroborationItem[]) {
-  return rows.map((item) => (
-    <article key={`${item.source}-${item.url}`} className="evidence-source-card">
-      <div className="evidence-source-card-head">
-        <span className="evidence-source-chip">{item.source}</span>
-      </div>
-      <p className="evidence-source-title">{item.title}</p>
-      {item.snippet && <p className="evidence-source-snippet">{item.snippet}</p>}
-      <a href={item.url} target="_blank" rel="noopener noreferrer" className="evidence-source-link">
-        Open source
-      </a>
-    </article>
-  ));
+interface TrustedSourceCard {
+  id: string;
+  source: string;
+  title: string;
+  snippet?: string;
+  url: string;
+  linkLabel: string;
+  dateLabel?: string;
+  verdictCode?: VerificationCode;
+  verdictLabel?: string;
+  auxLabel?: string;
+}
+
+function buildTrustedSourceCards(evidence: FindingEvidence): TrustedSourceCard[] {
+  const cards: TrustedSourceCard[] = [];
+
+  evidence.factChecks.forEach((match, index) => {
+    cards.push({
+      id: `factcheck:${index}:${match.reviewUrl}`,
+      source: match.publisher || 'Fact-check',
+      title: match.reviewTitle,
+      snippet: match.claimText ? `Claim: ${match.claimText}` : undefined,
+      url: match.reviewUrl,
+      linkLabel: 'Open source',
+      dateLabel: formatEvidenceDate(match.reviewDate),
+      verdictCode: match.normalizedVerdict === 'unknown' ? 'unverified' : match.normalizedVerdict,
+      verdictLabel: match.textualRating || match.normalizedVerdict,
+    });
+  });
+
+  evidence.corroboration.wikipedia.forEach((item, index) => {
+    cards.push({
+      id: `wikipedia:${index}:${item.url}`,
+      source: item.source,
+      title: item.title,
+      snippet: item.snippet,
+      url: item.url,
+      linkLabel: 'Open source',
+    });
+  });
+
+  evidence.corroboration.wikidata.forEach((item, index) => {
+    cards.push({
+      id: `wikidata:${index}:${item.url}`,
+      source: item.source,
+      title: item.title,
+      snippet: item.snippet,
+      url: item.url,
+      linkLabel: 'Open source',
+    });
+  });
+
+  evidence.corroboration.pubmed.forEach((item, index) => {
+    cards.push({
+      id: `pubmed:${index}:${item.url}`,
+      source: item.source,
+      title: item.title,
+      snippet: item.snippet,
+      url: item.url,
+      linkLabel: 'Open source',
+    });
+  });
+
+  evidence.gdeltArticles.forEach((article, index) => {
+    cards.push({
+      id: `gdelt:${index}:${article.url}`,
+      source: article.domain || 'GDELT',
+      title: article.title,
+      url: article.url,
+      linkLabel: 'Open source',
+      dateLabel: formatEvidenceDate(article.seenDate),
+      auxLabel:
+        typeof article.tone === 'number'
+          ? `Tone ${article.tone > 0 ? '+' : ''}${article.tone.toFixed(1)}`
+          : undefined,
+    });
+  });
+
+  return cards;
 }
 
 function stateLabel(state: ScanStatus['state']) {
@@ -264,6 +330,43 @@ function isYouTubeTabUrl(url?: string | null): boolean {
   } catch {
     return false;
   }
+}
+
+function getYouTubeVideoId(url?: string | null): string | null {
+  if (!url) return null;
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname.toLowerCase();
+    if (!['www.youtube.com', 'youtube.com', 'm.youtube.com', 'music.youtube.com'].includes(host)) {
+      return null;
+    }
+    return parsed.searchParams.get('v');
+  } catch {
+    return null;
+  }
+}
+
+function normalizeUrlWithoutHash(url: string): string {
+  try {
+    const parsed = new URL(url);
+    parsed.hash = '';
+    return `${parsed.origin}${parsed.pathname}${parsed.search}`;
+  } catch {
+    return url;
+  }
+}
+
+function reportMatchesTabUrl(report: ScanReport | null, tabUrl: string | null): boolean {
+  if (!report) return false;
+  if (!tabUrl) return true;
+
+  const reportVideoId = report.videoId ?? getYouTubeVideoId(report.url);
+  const activeVideoId = getYouTubeVideoId(tabUrl);
+  if (reportVideoId && activeVideoId) {
+    return reportVideoId === activeVideoId;
+  }
+
+  return normalizeUrlWithoutHash(report.url) === normalizeUrlWithoutHash(tabUrl);
 }
 
 function StepProgressRing({
@@ -524,6 +627,7 @@ function FindingDetailBody({
       }
     }
   }
+  const trustedSourceCards = evidence ? buildTrustedSourceCards(evidence) : [];
 
   return (
     <>
@@ -655,89 +759,34 @@ function FindingDetailBody({
                   </p>
                 )}
 
-                <div className="evidence-section">
-                  <h4>Fact-check matches</h4>
-                  {evidence.factChecks.length === 0 ? (
-                    <p className="evidence-empty">No direct ClaimReview match found.</p>
-                  ) : (
-                    <div className="evidence-source-list" data-testid="factcheck-list">
-                      {evidence.factChecks.map((match) => (
-                        <article key={`${match.reviewUrl}-${match.publisher}`} className="evidence-source-card">
-                          <div className="evidence-source-card-head">
-                            <span className="evidence-source-chip">{match.publisher}</span>
-                            <span className={verificationPillClass(
-                              match.normalizedVerdict === 'unknown' ? 'unverified' : match.normalizedVerdict,
-                            )}>
-                              {match.textualRating || match.normalizedVerdict}
+                {trustedSourceCards.length === 0 ? (
+                  <p className="evidence-empty">No trusted sources found for this finding.</p>
+                ) : (
+                  <div className="evidence-source-list" data-testid="trusted-source-list">
+                    {trustedSourceCards.map((item) => (
+                      <article key={item.id} className="evidence-source-card">
+                        <div className="evidence-source-card-head">
+                          <span className="evidence-source-chip">{item.source}</span>
+                          {item.verdictCode ? (
+                            <span className={verificationPillClass(item.verdictCode)}>
+                              {item.verdictLabel || item.verdictCode}
                             </span>
-                          </div>
-                          <p className="evidence-source-title">{match.reviewTitle}</p>
-                          {match.claimText && (
-                            <p className="evidence-source-snippet">Claim: {match.claimText}</p>
-                          )}
-                          <div className="evidence-source-meta">
-                            {match.reviewDate && <span>{formatEvidenceDate(match.reviewDate)}</span>}
-                            {match.reviewUrl && (
-                              <a
-                                href={match.reviewUrl}
-                                target="_blank"
-                                rel="noopener noreferrer"
-                                className="evidence-source-link"
-                              >
-                                Open fact-check
-                              </a>
-                            )}
-                          </div>
-                        </article>
-                      ))}
-                    </div>
-                  )}
-                </div>
-
-                <div className="evidence-section">
-                  <h4>Corroboration sources</h4>
-                  {evidence.corroboration.wikipedia.length === 0 &&
-                  evidence.corroboration.wikidata.length === 0 &&
-                  evidence.corroboration.pubmed.length === 0 ? (
-                    <p className="evidence-empty">No corroboration sources found.</p>
-                  ) : (
-                    <div className="evidence-source-list" data-testid="corroboration-list">
-                      {renderCorroborationRows(evidence.corroboration.wikipedia)}
-                      {renderCorroborationRows(evidence.corroboration.wikidata)}
-                      {renderCorroborationRows(evidence.corroboration.pubmed)}
-                    </div>
-                  )}
-                </div>
-
-                <div className="evidence-section">
-                  <h4>Related reporting (GDELT)</h4>
-                  {evidence.gdeltArticles.length === 0 ? (
-                    <p className="evidence-empty">No related GDELT articles found.</p>
-                  ) : (
-                    <div className="evidence-source-list" data-testid="gdelt-list">
-                      {evidence.gdeltArticles.map((article) => (
-                        <article key={article.url} className="evidence-source-card">
-                          <div className="evidence-source-card-head">
-                            <span className="evidence-source-chip">{article.domain}</span>
-                            {typeof article.tone === 'number' && (
-                              <span className="evidence-source-meta-text">
-                                Tone {article.tone > 0 ? '+' : ''}
-                                {article.tone.toFixed(1)}
-                              </span>
-                            )}
-                          </div>
-                          <p className="evidence-source-title">{article.title}</p>
-                          <div className="evidence-source-meta">
-                            {article.seenDate && <span>{formatEvidenceDate(article.seenDate)}</span>}
-                            <a href={article.url} target="_blank" rel="noopener noreferrer" className="evidence-source-link">
-                              Open article
-                            </a>
-                          </div>
-                        </article>
-                      ))}
-                    </div>
-                  )}
-                </div>
+                          ) : item.auxLabel ? (
+                            <span className="evidence-source-meta-text">{item.auxLabel}</span>
+                          ) : null}
+                        </div>
+                        <p className="evidence-source-title">{item.title}</p>
+                        {item.snippet && <p className="evidence-source-snippet">{item.snippet}</p>}
+                        <div className="evidence-source-meta">
+                          {item.dateLabel ? <span>{item.dateLabel}</span> : <span />}
+                          <a href={item.url} target="_blank" rel="noopener noreferrer" className="evidence-source-link">
+                            {item.linkLabel}
+                          </a>
+                        </div>
+                      </article>
+                    ))}
+                  </div>
+                )}
 
                 {evidenceErrors.length > 0 && (
                   <div className="evidence-partial-errors" data-testid="evidence-partial-errors">
@@ -901,7 +950,7 @@ function App() {
 
   /* ---- data loading ---- */
 
-  const loadStatusAndReport = useCallback(async (tabId: number) => {
+  const loadStatusAndReport = useCallback(async (tabId: number, tabUrl: string | null) => {
     const [status, reportResponse] = await Promise.all([
       sendMessage<ScanStatus>({ type: 'GET_SCAN_STATUS', tabId }),
       getReportWithRetry(tabId),
@@ -909,7 +958,8 @@ function App() {
     setScanStatus(
       status ?? { tabId, state: 'idle', progress: 0, message: 'Idle.', updatedAt: Date.now() },
     );
-    setReport(reportResponse?.report ?? null);
+    const nextReport = reportResponse?.report ?? null;
+    setReport(reportMatchesTabUrl(nextReport, tabUrl) ? nextReport : null);
   }, []);
 
   const loadFindingEvidence = useCallback(
@@ -997,7 +1047,7 @@ function App() {
               : null;
         setActiveTabUrl(resolvedTabUrl);
         if (currentTabId != null) {
-          await loadStatusAndReport(currentTabId);
+          await loadStatusAndReport(currentTabId, resolvedTabUrl);
           const focusResponse = await getFocusFindingWithRetry(currentTabId).catch(
             () => ({ findingId: null }),
           );
@@ -1033,22 +1083,23 @@ function App() {
           type: 'GET_SCAN_STATUS',
           tabId: activeTabId,
         });
-        setScanStatus(status);
+          setScanStatus(status);
 
-        if (!runningStates.has(status.state)) {
-          const reportResponse = await sendMessage<ReportResponse>({
-            type: 'GET_REPORT',
-            tabId: activeTabId,
-          }).catch(async () => getReportWithRetry(activeTabId));
-          setReport(reportResponse?.report ?? null);
+          if (!runningStates.has(status.state)) {
+            const reportResponse = await sendMessage<ReportResponse>({
+              type: 'GET_REPORT',
+              tabId: activeTabId,
+            }).catch(async () => getReportWithRetry(activeTabId));
+            const nextReport = reportResponse?.report ?? null;
+            setReport(reportMatchesTabUrl(nextReport, activeTabUrl) ? nextReport : null);
+          }
+        } catch {
+          // Ignore transient polling failures.
         }
-      } catch {
-        // Ignore transient polling failures.
-      }
-    }, 1600);
+      }, 1600);
 
     return () => clearInterval(timer);
-  }, [activeTabId, scanStatus.state]);
+  }, [activeTabId, activeTabUrl, scanStatus.state]);
 
   useEffect(() => {
     if (activeTabId == null || report) return;
@@ -1062,7 +1113,7 @@ function App() {
         ]);
 
         if (cancelled) return;
-        if (reportResponse?.report) {
+        if (reportResponse?.report && reportMatchesTabUrl(reportResponse.report, activeTabUrl)) {
           setReport(reportResponse.report);
         }
 
@@ -1080,7 +1131,7 @@ function App() {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [activeTabId, report]);
+  }, [activeTabId, activeTabUrl, report]);
 
   useEffect(() => {
     setEvidenceByFinding({});
@@ -1172,6 +1223,7 @@ function App() {
   }, [report?.findings, report?.scanKind, filter]);
 
   const isRunning = runningStates.has(scanStatus.state);
+  const canStartScan = activeTabId != null && hasApiKey;
   const totalFindings = report?.summary.totalFindings ?? 0;
   const stepInfo = getStepInfo(scanStatus.state);
   const isYoutubeMode =
@@ -1249,14 +1301,26 @@ function App() {
             <h1 className="headline">Clarity</h1>
           </div>
         </div>
-        <SettingsModal
-          hasApiKey={hasApiKey}
-          hasGoogleFactCheckApiKey={hasGoogleFactCheckApiKey}
-          onSaved={(updates) => {
-            if (updates.openRouter) setHasApiKey(true);
-            if (updates.googleFactCheck) setHasGoogleFactCheckApiKey(true);
-          }}
-        />
+        <div className="header-actions">
+          <button
+            type="button"
+            className="rescan-trigger"
+            data-testid="header-rescan"
+            onClick={() => void startScan()}
+            disabled={!canStartScan || isRunning}
+          >
+            <RotateCcw className={`size-[13px] ${isRunning ? 'animate-spin' : ''}`} />
+            {isRunning ? 'Scanning' : 'Rescan'}
+          </button>
+          <SettingsModal
+            hasApiKey={hasApiKey}
+            hasGoogleFactCheckApiKey={hasGoogleFactCheckApiKey}
+            onSaved={(updates) => {
+              if (updates.openRouter) setHasApiKey(true);
+              if (updates.googleFactCheck) setHasGoogleFactCheckApiKey(true);
+            }}
+          />
+        </div>
       </header>
 
       {webViewMode === 'initial' ? (
@@ -1273,7 +1337,7 @@ function App() {
             <Button
               data-testid="start-scan"
               onClick={() => void startScan()}
-              disabled={activeTabId == null || !hasApiKey}
+              disabled={!canStartScan}
               className="screen14-action"
               size="sm"
             >
