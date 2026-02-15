@@ -799,8 +799,12 @@ async function resolveFindingEvidence(options: {
       id: finding.id,
       quote: finding.quote,
       correction: finding.correction,
+      rationale: finding.rationale,
+      issueTypes: finding.issueTypes,
     },
+    pageContext: report.pageContext,
     googleFactCheckApiKey: await getGoogleFactCheckApiKey(),
+    openRouterApiKey: await getApiKey(),
   })
     .then(async (evidence) => {
       await saveFindingEvidence(tabId, findingId, evidence);

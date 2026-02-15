@@ -177,8 +177,9 @@ test('click-origin focus routing surfaces reasoning in popup', async () => {
     await expect(focusedCard.getByTestId('finding-rationale')).toContainText(
       'Test rationale from highlight click flow.',
     );
+    await focusedCard.getByTestId('load-evidence').click();
     await expect(focusedCard.getByTestId('evidence-content')).toBeVisible();
-    await expect(focusedCard.getByTestId('factcheck-list')).toContainText('PolitiFact');
+    await expect(focusedCard.getByTestId('trusted-source-list')).toContainText('PolitiFact');
   } finally {
     await popupPage?.close().catch(() => {});
     await articlePage?.close().catch(() => {});

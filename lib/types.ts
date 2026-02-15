@@ -53,6 +53,7 @@ export interface EvidenceErrors {
   wikidata?: string;
   pubmed?: string;
   gdelt?: string;
+  openrouter?: string;
 }
 
 export interface FindingEvidence {
@@ -109,10 +110,17 @@ export interface ScanSummary {
   biasCount: number;
 }
 
+export interface PageContext {
+  summary: string;
+  topicKeywords: string[];
+  entityKeywords: string[];
+}
+
 export interface ScanReport {
   tabId: number;
   url: string;
   title: string;
+  pageContext?: PageContext;
   scanKind?: 'webpage' | 'youtube_video';
   videoId?: string;
   transcript?: TranscriptPayload;

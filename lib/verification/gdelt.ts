@@ -47,7 +47,7 @@ function buildGdeltUrl(query: string): string {
     format: 'json',
     maxrecords: '30',
     timespan: '3m',
-    sort: 'ToneDesc',
+    sort: 'DateDesc',
   });
   return `${GDELT_API}?${params.toString()}`;
 }
