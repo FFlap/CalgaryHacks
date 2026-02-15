@@ -201,6 +201,15 @@ async function seedReport(popupPage: Page, tabId: number, findingId: string): Pr
   );
 }
 
+async function seedGoogleFactCheckApiKey(popupPage: Page): Promise<void> {
+  await popupPage.evaluate(async () => {
+    const runtimeChrome = (globalThis as any).chrome;
+    await runtimeChrome.storage.local.set({
+      google_fact_check_api_key: 'e2e-google-fact-check-key',
+    });
+  });
+}
+
 test('evidence panel loads trusted sources and reuses cached response across popup sessions', async () => {
   const launch = await launchExtensionContext();
   const { context, extensionId, userDataDir } = launch;
@@ -217,6 +226,7 @@ test('evidence panel loads trusted sources and reuses cached response across pop
     const tabId = await resolveExampleTabId(popupPage);
     const findingId = 'evidence-test-finding';
 
+    await seedGoogleFactCheckApiKey(popupPage);
     await seedReport(popupPage, tabId, findingId);
 
     await popupPage.close();
@@ -225,11 +235,12 @@ test('evidence panel loads trusted sources and reuses cached response across pop
     await popupPage.locator(`[data-finding-id="${findingId}"] .finding-summary`).click();
 
     const focusedCard = popupPage.locator(`[data-finding-id="${findingId}"]`);
+    await focusedCard.getByTestId('load-evidence').click();
     await expect(focusedCard.getByTestId('evidence-content')).toBeVisible();
     await expect(focusedCard.getByTestId('evidence-status-pill')).toContainText('Contradicted');
-    await expect(focusedCard.getByTestId('factcheck-list')).toContainText('PolitiFact');
-    await expect(focusedCard.getByTestId('corroboration-list')).toContainText('Example Domain');
-    await expect(focusedCard.getByTestId('gdelt-list')).toContainText('Related reporting article');
+    await expect(focusedCard.getByTestId('trusted-source-list')).toContainText('PolitiFact');
+    await expect(focusedCard.getByTestId('trusted-source-list')).toContainText('Example Domain');
+    await expect(focusedCard.getByTestId('trusted-source-list')).toContainText('Related reporting article');
 
     expect(counters.google).toBe(1);
     expect(counters.wikipedia).toBe(1);
@@ -243,8 +254,9 @@ test('evidence panel loads trusted sources and reuses cached response across pop
     await popupPage.locator(`[data-finding-id="${findingId}"] .finding-summary`).click();
 
     const cachedCard = popupPage.locator(`[data-finding-id="${findingId}"]`);
+    await cachedCard.getByTestId('load-evidence').click();
     await expect(cachedCard.getByTestId('evidence-content')).toBeVisible();
-    await expect(cachedCard.getByTestId('factcheck-list')).toContainText('PolitiFact');
+    await expect(cachedCard.getByTestId('trusted-source-list')).toContainText('PolitiFact');
 
     await popupPage.waitForTimeout(600);
     expect(counters.google).toBe(1);
@@ -276,6 +288,7 @@ test('evidence panel tolerates provider failure and still renders remaining sour
     const tabId = await resolveExampleTabId(popupPage);
     const findingId = 'evidence-failure-finding';
 
+    await seedGoogleFactCheckApiKey(popupPage);
     await seedReport(popupPage, tabId, findingId);
 
     await popupPage.close();
@@ -284,9 +297,10 @@ test('evidence panel tolerates provider failure and still renders remaining sour
     await popupPage.locator(`[data-finding-id="${findingId}"] .finding-summary`).click();
 
     const card = popupPage.locator(`[data-finding-id="${findingId}"]`);
+    await card.getByTestId('load-evidence').click();
     await expect(card.getByTestId('evidence-content')).toBeVisible();
-    await expect(card.getByTestId('factcheck-list')).toContainText('PolitiFact');
-    await expect(card.getByTestId('gdelt-list')).toContainText('Related reporting article');
+    await expect(card.getByTestId('trusted-source-list')).toContainText('PolitiFact');
+    await expect(card.getByTestId('trusted-source-list')).toContainText('Related reporting article');
     await expect(card.getByTestId('evidence-partial-errors')).toContainText('wikipedia');
   } finally {
     await popupPage?.close().catch(() => {});

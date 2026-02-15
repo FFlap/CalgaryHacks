@@ -2,6 +2,7 @@ import type { FindingEvidence, ScanReport } from '@/lib/types';
 
 const API_KEY_STORAGE_KEY = 'openrouter_api_key';
 const LEGACY_API_KEY_STORAGE_KEY = 'gemini_api_key';
+const GOOGLE_FACT_CHECK_API_KEY_STORAGE_KEY = 'google_fact_check_api_key';
 const REPORT_PREFIX = 'scan_report_';
 const EVIDENCE_PREFIX = 'finding_evidence_';
 
@@ -22,6 +23,22 @@ export async function getApiKey(): Promise<string | null> {
 
 export async function hasApiKey(): Promise<boolean> {
   return (await getApiKey()) !== null;
+}
+
+export async function saveGoogleFactCheckApiKey(apiKey: string): Promise<void> {
+  await ext.storage.local.set({
+    [GOOGLE_FACT_CHECK_API_KEY_STORAGE_KEY]: apiKey,
+  });
+}
+
+export async function getGoogleFactCheckApiKey(): Promise<string | null> {
+  const stored = await ext.storage.local.get([GOOGLE_FACT_CHECK_API_KEY_STORAGE_KEY]);
+  const value = stored[GOOGLE_FACT_CHECK_API_KEY_STORAGE_KEY];
+  return typeof value === 'string' && value.trim().length > 0 ? value : null;
+}
+
+export async function hasGoogleFactCheckApiKey(): Promise<boolean> {
+  return (await getGoogleFactCheckApiKey()) !== null;
 }
 
 export async function saveReport(tabId: number, report: ScanReport): Promise<void> {

@@ -53,6 +53,7 @@ export interface EvidenceErrors {
   wikidata?: string;
   pubmed?: string;
   gdelt?: string;
+  openrouter?: string;
 }
 
 export interface FindingEvidence {
@@ -75,6 +76,19 @@ export interface FindingEvidence {
   errors: EvidenceErrors;
 }
 
+export interface TranscriptSegment {
+  id: string;
+  startSec: number;
+  startLabel: string;
+  text: string;
+}
+
+export interface TranscriptPayload {
+  source: 'youtube_api';
+  segments: TranscriptSegment[];
+  unavailableReason?: string;
+}
+
 export interface Finding {
   id: string;
   quote: string;
@@ -84,6 +98,8 @@ export interface Finding {
   severity: number;
   rationale: string;
   correction?: string;
+  timestampSec?: number;
+  timestampLabel?: string;
   highlightApplied?: boolean;
 }
 
@@ -94,10 +110,20 @@ export interface ScanSummary {
   biasCount: number;
 }
 
+export interface PageContext {
+  summary: string;
+  topicKeywords: string[];
+  entityKeywords: string[];
+}
+
 export interface ScanReport {
   tabId: number;
   url: string;
   title: string;
+  pageContext?: PageContext;
+  scanKind?: 'webpage' | 'youtube_video';
+  videoId?: string;
+  transcript?: TranscriptPayload;
   scannedAt: string;
   summary: ScanSummary;
   findings: Finding[];
@@ -114,17 +140,27 @@ export interface ScanStatus {
   errorCode?: string;
 }
 
+export interface YouTubeTranscriptExtractionResult {
+  ok: boolean;
+  source?: 'youtube_api';
+  segments?: TranscriptSegment[];
+  reason?: string;
+}
+
 export type RuntimeRequest =
   | { type: 'SAVE_API_KEY'; apiKey: string }
+  | { type: 'SAVE_GOOGLE_FACT_CHECK_API_KEY'; apiKey: string }
   | { type: 'GET_SETTINGS' }
   | { type: 'START_SCAN'; tabId?: number }
+  | { type: 'GET_EMBEDDED_PANEL_STATE' }
   | { type: 'GET_SCAN_STATUS'; tabId?: number }
   | { type: 'GET_REPORT'; tabId: number }
   | { type: 'GET_FINDING_EVIDENCE'; tabId: number; findingId: string; forceRefresh?: boolean }
   | { type: 'GET_FOCUS_FINDING'; tabId: number }
   | { type: 'OPEN_POPUP_FOR_FINDING'; findingId: string; tabId?: number }
   | { type: 'JUMP_TO_FINDING'; tabId: number; findingId: string }
-  | { type: 'CLEAR_HIGHLIGHTS'; tabId: number };
+  | { type: 'CLEAR_HIGHLIGHTS'; tabId: number }
+  | { type: 'GET_TRANSCRIPT'; videoId: string; tabId?: number };
 
 export interface ExtractionResult {
   url: string;
@@ -138,6 +174,7 @@ export interface CandidateClaim {
   quote: string;
   issueHints: IssueType[];
   subtypeHint?: string;
+  timestampLabel?: string;
   reason?: string;
 }
 
@@ -149,4 +186,12 @@ export interface RawFinding {
   severity: number;
   rationale: string;
   correction?: string;
+  timestampLabel?: string;
+}
+
+export interface EmbeddedPanelUpdate {
+  type: 'EMBEDDED_PANEL_UPDATE';
+  tabId: number;
+  status: ScanStatus;
+  report: ScanReport | null;
 }

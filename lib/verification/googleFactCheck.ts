@@ -4,8 +4,6 @@ import { fetchJsonWithRetry } from '@/lib/verification/http';
 
 const GOOGLE_FACT_CHECK_API = 'https://factchecktools.googleapis.com/v1alpha1/claims:search';
 
-declare const __GOOGLE_FACT_CHECK_API_KEY__: string;
-
 interface GoogleFactCheckResponse {
   claims?: Array<{
     text?: string;
@@ -46,15 +44,21 @@ function normalizeVerdict(input: string): NormalizedVerdict {
   return 'unknown';
 }
 
-export function hasGoogleFactCheckApiKey(): boolean {
-  return Boolean(__GOOGLE_FACT_CHECK_API_KEY__ && __GOOGLE_FACT_CHECK_API_KEY__.trim().length > 0);
+function normalizeApiKey(apiKey?: string | null): string {
+  return typeof apiKey === 'string' ? apiKey.trim() : '';
 }
 
-export async function searchGoogleFactChecks(query: string): Promise<{
+export function hasGoogleFactCheckApiKey(apiKey?: string | null): boolean {
+  return normalizeApiKey(apiKey).length > 0;
+}
+
+export async function searchGoogleFactChecks(query: string, apiKey?: string | null): Promise<{
   configured: boolean;
   matches: FactCheckMatch[];
 }> {
-  if (!hasGoogleFactCheckApiKey()) {
+  const key = normalizeApiKey(apiKey);
+
+  if (!key) {
     return { configured: false, matches: [] };
   }
 
@@ -62,7 +66,7 @@ export async function searchGoogleFactChecks(query: string): Promise<{
     query,
     languageCode: 'en',
     pageSize: '10',
-    key: __GOOGLE_FACT_CHECK_API_KEY__,
+    key,
   });
 
   const url = `${GOOGLE_FACT_CHECK_API}?${params.toString()}`;

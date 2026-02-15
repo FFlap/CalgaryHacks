@@ -127,6 +127,7 @@ test('click-origin focus routing surfaces reasoning in popup', async () => {
     await popupPage.evaluate(async ({ targetTabId, focusId }) => {
       const runtimeChrome = (globalThis as any).chrome;
       await runtimeChrome.storage.local.set({
+        google_fact_check_api_key: 'e2e-google-fact-check-key',
         [`scan_report_${targetTabId}`]: {
           tabId: targetTabId,
           url: 'https://example.com/',
@@ -176,8 +177,9 @@ test('click-origin focus routing surfaces reasoning in popup', async () => {
     await expect(focusedCard.getByTestId('finding-rationale')).toContainText(
       'Test rationale from highlight click flow.',
     );
+    await focusedCard.getByTestId('load-evidence').click();
     await expect(focusedCard.getByTestId('evidence-content')).toBeVisible();
-    await expect(focusedCard.getByTestId('factcheck-list')).toContainText('PolitiFact');
+    await expect(focusedCard.getByTestId('trusted-source-list')).toContainText('PolitiFact');
   } finally {
     await popupPage?.close().catch(() => {});
     await articlePage?.close().catch(() => {});

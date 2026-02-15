@@ -25,13 +25,6 @@ interface OpenRouterResponse {
   };
 }
 
-interface OpenRouterTextRequestOptions {
-  apiKey: string;
-  prompt: string;
-  timeoutMs: number;
-  strictMode: boolean;
-}
-
 function extractBalancedJsonDocument(input: string): string | null {
   let start = -1;
   for (let i = 0; i < input.length; i += 1) {
@@ -112,42 +105,49 @@ function extractJsonBlock(input: string): string {
   return input.trim();
 }
 
+function stripFenceMarkers(input: string): string {
+  return input
+    .replace(/```(?:json)?/gi, '')
+    .replace(/^\s*`+json\b/gi, '')
+    .replace(/`{3,}/g, '')
+    .trim();
+}
+
 function normalizeJsonCandidate(input: string): string {
   return input
-    .replace(/[\u201c\u201d]/g, '"')
-    .replace(/[\u2018\u2019]/g, "'")
+    .replace(/^\uFEFF/, '')
+    .replace(/[“”]/g, '"')
+    .replace(/[‘’]/g, "'")
     .replace(/,\s*([}\]])/g, '$1')
     .trim();
 }
 
-function parseJsonWithRecovery<T>(input: string): T {
-  const candidates: string[] = [];
+function parseJsonWithRecovery<T>(raw: string): T {
+  const stripped = stripFenceMarkers(raw);
+  const extracted = extractJsonBlock(raw);
+  const strippedExtracted = stripFenceMarkers(extracted);
+  const attempts = [
+    raw,
+    stripped,
+    extracted,
+    strippedExtracted,
+    normalizeJsonCandidate(raw),
+    normalizeJsonCandidate(stripped),
+    normalizeJsonCandidate(extracted),
+    normalizeJsonCandidate(strippedExtracted),
+  ];
+  let lastError: unknown;
 
-  candidates.push(input.trim());
-
-  const normalized = normalizeJsonCandidate(input);
-  if (normalized !== input) {
-    candidates.push(normalized);
-  }
-
-  const balancedFromNormalized = extractBalancedJsonDocument(normalized);
-  if (balancedFromNormalized && !candidates.includes(balancedFromNormalized)) {
-    candidates.push(balancedFromNormalized);
-  }
-
-  let lastError: Error | null = null;
-
-  for (const candidate of candidates) {
+  for (const candidate of attempts) {
     try {
       return JSON.parse(candidate) as T;
     } catch (error) {
-      lastError = error instanceof Error ? error : new Error('Unknown JSON parsing error.');
+      lastError = error;
     }
   }
 
-  throw new Error(
-    `OpenRouter response was not valid JSON after recovery attempts: ${lastError?.message ?? 'unknown error.'}`,
-  );
+  const message = lastError instanceof Error ? lastError.message : 'Unknown JSON parse error.';
+  throw new Error(`Failed to parse model JSON response: ${message}`);
 }
 
 function parseResponseText(response: OpenRouterResponse): string {
@@ -219,6 +219,7 @@ export async function callOpenRouterJson<T>(options: OpenRouterCallOptions): Pro
       if (parsed.error?.message) {
         throw new Error(`OpenRouter error: ${parsed.error.message}`);
       }
+
       const text = parseResponseText(parsed);
 
       try {

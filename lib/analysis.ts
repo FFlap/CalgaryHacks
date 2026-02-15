@@ -3,13 +3,20 @@ import type {
   CandidateClaim,
   Finding,
   IssueType,
+  PageContext,
   RawFinding,
   ScanReport,
   ScanSummary,
+  TranscriptSegment,
 } from '@/lib/types';
+import { nearestSegmentForTimestampLabel } from '@/lib/youtube-transcript';
 
-const MISINFORMATION_THRESHOLD = 0.78;
-const ARGUMENT_THRESHOLD = 0.58;
+const MISINFORMATION_THRESHOLD = 0.6;
+const ARGUMENT_THRESHOLD = 0.5;
+const YOUTUBE_MISINFORMATION_THRESHOLD = 0.45;
+const YOUTUBE_ARGUMENT_THRESHOLD = 0.35;
+const MAX_TRANSCRIPT_PROMPT_SEGMENTS = 520;
+const MAX_CONTEXT_CHARS = 16_000;
 
 const FALLACY_SUBTYPES = new Set([
   'straw man',
@@ -28,97 +35,54 @@ const BIAS_SUBTYPES = new Set([
 ]);
 
 const ALLOWED_ISSUE_TYPES = new Set<IssueType>(['misinformation', 'fallacy', 'bias']);
-const AFFIRMING_PATTERNS = [
-  /\baccurate\b/,
-  /\btrue\b/,
-  /\bcorrect\b/,
-  /\bfactual\b/,
-  /\bconfirmed\b/,
-  /\bdid happen\b/,
-  /\bis accurate\b/,
-  /\bis true\b/,
-];
-const MISINFORMATION_PATTERNS = [
-  /\bfalse\b/,
-  /\binaccurate\b/,
-  /\bmisleading\b/,
-  /\bdebunked\b/,
-  /\bfabricated\b/,
-  /\bhoax\b/,
-  /\bunfounded\b/,
-  /\bunsupported\b/,
-  /\bnot true\b/,
-  /\bno evidence\b/,
-  /\bwithout evidence\b/,
-  /\blacks evidence\b/,
-  /\bout of context\b/,
-];
-const FALLACY_PATTERNS: Record<string, RegExp[]> = {
-  'ad hominem': [/\bad hominem\b/, /\bname[- ]calling\b/, /\bcharacter attack\b/, /\binsult\b/],
-  'appeal to fear': [/\bappeal to fear\b/, /\bfear\b/, /\bpanic\b/, /\bthreat\b/, /\bchaos\b/],
-  'false dilemma': [/\bfalse dilemma\b/, /\beither\b.+\bor\b/, /\bonly choice\b/, /\bno alternative\b/],
-  'hasty generalization': [/\bhasty generalization\b/, /\beveryone\b/, /\balways\b/, /\bnever\b/, /\ball\b.+\b(are|is)\b/],
-  'slippery slope': [/\bslippery slope\b/, /\blead(s)? to\b.+\b(inevitably|always)\b/, /\broad-testing tactics\b/],
-  'straw man': [/\bstraw man\b/, /\bmisrepresent(s|ed|ing)?\b/, /\bcaricature\b/],
+const HTML_ENTITY_MAP: Record<string, string> = {
+  '&amp;': '&',
+  '&lt;': '<',
+  '&gt;': '>',
+  '&quot;': '"',
+  '&apos;': "'",
+  '&#39;': "'",
 };
-const BIAS_PATTERNS: Record<string, RegExp[]> = {
-  'loaded language': [
-    /\bloaded language\b/,
-    /\bauthoritarian\b/,
-    /\bshameless\b/,
-    /\bbad man\b/,
-    /\bhenchmen\b/,
-    /\bstorm troopers\b/,
-    /\bconfederates\b/,
-    /\bcowed\b/,
-    /\bcomplicit\b/,
-    /\bcorrupt(?:ed|ion)?\b/,
-  ],
-  'cherry picking': [/\bcherry picking\b/, /\bselective\b/, /\bone-sided\b/, /\bonly cites\b/],
-  'framing bias': [/\bframing bias\b/, /\bframe(?:d|s|ing)?\b/, /\bnarrative\b/, /\bperformative\b/],
-  'confirmation framed rhetoric': [/\bconfirmation\b/, /\bpreexisting\b/, /\benabler(s)?\b/, /\bpartisan\b/],
-};
-const HEURISTIC_MAX_FINDINGS = 8;
-const HEURISTIC_LOADED_LANGUAGE_TERMS = [
-  'bad man',
-  'storm troopers',
-  'henchmen',
-  'authoritarian',
-  'authoritarianism',
-  'shameless',
-  'complicit',
-  'confederates',
-  'corrupt',
-  'corruption',
-  'sabotage',
-  'betrayal',
-  'fascistic',
-  'cowed',
-  'lawbreaking',
-  'minions',
-];
-const HEURISTIC_APPEAL_TO_FEAR_TERMS = [
-  'chaos',
-  'threaten',
-  'seizing protesters',
-  'remain in power',
-  'road-testing tactics',
-  'violence',
-  'paramilitary',
-  'repress the vote',
-  'undermine the election',
-  'unconstitutional use of force',
-];
 
 function normalizeText(input: string): string {
   return input.toLowerCase().replace(/\s+/g, ' ').trim();
 }
 
-function normalizeComparableText(input: string): string {
-  return normalizeText(input)
-    .replace(/[^a-z0-9\s]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
+function decodeHtmlEntities(input: string): string {
+  let value = input;
+  for (let round = 0; round < 3; round += 1) {
+    const next = value
+      .replace(/&(amp|lt|gt|quot|apos|#39);/gi, (entity) => HTML_ENTITY_MAP[entity.toLowerCase()] ?? entity)
+      .replace(/&#(\d+);/g, (_, codeText) => {
+        const code = Number(codeText);
+        if (!Number.isFinite(code)) return _;
+        try {
+          return String.fromCodePoint(code);
+        } catch {
+          return _;
+        }
+      });
+    if (next === value) break;
+    value = next;
+  }
+  return value;
+}
+
+function stripWrappingQuotes(input: string): string {
+  let value = input.trim();
+  for (let i = 0; i < 2; i += 1) {
+    const next = value
+      .replace(/^[\s"'`“”‘’]+/, '')
+      .replace(/[\s"'`“”‘’]+$/, '')
+      .trim();
+    if (next === value) break;
+    value = next;
+  }
+  return value;
+}
+
+function normalizeQuoteText(input: string): string {
+  return stripWrappingQuotes(decodeHtmlEntities(input).replace(/\s+/g, ' '));
 }
 
 function normalizeSubtype(input?: string): string {
@@ -129,268 +93,25 @@ function normalizeSubtype(input?: string): string {
     .trim();
 }
 
-function tokenOverlap(left: string, right: string): { leftCoverage: number; rightCoverage: number } {
-  const leftTokens = Array.from(new Set(normalizeComparableText(left).split(' ').filter((token) => token.length > 2)));
-  const rightTokens = Array.from(new Set(normalizeComparableText(right).split(' ').filter((token) => token.length > 2)));
+function canonicalizeSubtype(input?: string): string | undefined {
+  const subtype = normalizeSubtype(input);
+  if (!subtype) return undefined;
 
-  if (leftTokens.length === 0 || rightTokens.length === 0) {
-    return { leftCoverage: 0, rightCoverage: 0 };
-  }
+  const mappings = new Map<string, string>([
+    ['false dichotomy', 'false dilemma'],
+    ['either or fallacy', 'false dilemma'],
+    ['hasty conclusion', 'hasty generalization'],
+    ['slippery slope argument', 'slippery slope'],
+    ['fear appeal', 'appeal to fear'],
+    ['appeal to emotion', 'appeal to fear'],
+    ['loaded wording', 'loaded language'],
+    ['emotive language', 'loaded language'],
+    ['selection bias', 'cherry picking'],
+    ['framing', 'framing bias'],
+    ['confirmation bias', 'confirmation framed rhetoric'],
+  ]);
 
-  const rightSet = new Set(rightTokens);
-  const overlapCount = leftTokens.reduce((count, token) => count + (rightSet.has(token) ? 1 : 0), 0);
-
-  const leftCoverage = overlapCount / leftTokens.length;
-  const rightCoverage = overlapCount / rightTokens.length;
-
-  return { leftCoverage, rightCoverage };
-}
-
-function isNearDuplicate(left: string, right?: string): boolean {
-  if (!right) {
-    return false;
-  }
-
-  const a = normalizeComparableText(left);
-  const b = normalizeComparableText(right);
-  if (!a || !b) {
-    return false;
-  }
-
-  if (a === b || a.includes(b) || b.includes(a)) {
-    return true;
-  }
-
-  const overlap = tokenOverlap(a, b);
-  return overlap.leftCoverage >= 0.82 && overlap.rightCoverage >= 0.82;
-}
-
-function hasPattern(patterns: RegExp[], text: string): boolean {
-  return patterns.some((pattern) => pattern.test(text));
-}
-
-function containsAnyTerm(text: string, terms: string[]): boolean {
-  return terms.some((term) => text.includes(term));
-}
-
-function splitIntoCandidateSentences(text: string): string[] {
-  const sentences: string[] = [];
-  const blocks = text
-    .split(/\n+/)
-    .map((block) => block.replace(/\s+/g, ' ').trim())
-    .filter((block) => block.length >= 20);
-
-  for (const block of blocks) {
-    const parts = block.split(/(?<=[.!?])\s+/);
-    for (const part of parts) {
-      const sentence = part.trim();
-      if (sentence.length < 24 || sentence.length > 240) {
-        continue;
-      }
-      sentences.push(sentence);
-    }
-  }
-
-  return sentences;
-}
-
-function buildHeuristicRawFindings(text: string): RawFinding[] {
-  const findings: RawFinding[] = [];
-  const seenQuotes = new Set<string>();
-  const sentences = splitIntoCandidateSentences(text);
-
-  for (const sentence of sentences) {
-    const normalizedSentence = normalizeText(sentence);
-    if (seenQuotes.has(normalizedSentence)) {
-      continue;
-    }
-
-    if (containsAnyTerm(normalizedSentence, HEURISTIC_LOADED_LANGUAGE_TERMS)) {
-      findings.push({
-        quote: sentence,
-        issueTypes: ['bias'],
-        subtype: 'loaded language',
-        confidence: 0.64,
-        severity: 2,
-        rationale:
-          'Uses emotionally charged wording and character-framing terms instead of neutral phrasing.',
-      });
-      seenQuotes.add(normalizedSentence);
-    } else if (containsAnyTerm(normalizedSentence, HEURISTIC_APPEAL_TO_FEAR_TERMS)) {
-      findings.push({
-        quote: sentence,
-        issueTypes: ['fallacy'],
-        subtype: 'appeal to fear',
-        confidence: 0.62,
-        severity: 2,
-        rationale:
-          'Leans on threat and chaos framing to persuade through fear-heavy consequences.',
-      });
-      seenQuotes.add(normalizedSentence);
-    }
-
-    if (findings.length >= HEURISTIC_MAX_FINDINGS) {
-      break;
-    }
-  }
-
-  return findings;
-}
-
-function quoteAppearsOnPage(
-  quote: string,
-  normalizedPageText: string,
-  normalizedPageComparable: string,
-): boolean {
-  const normalizedQuote = normalizeText(quote);
-  if (normalizedQuote.length < 16) {
-    return false;
-  }
-
-  if (normalizedPageText.includes(normalizedQuote)) {
-    return true;
-  }
-
-  const comparableQuote = normalizeComparableText(quote);
-  if (!comparableQuote) {
-    return false;
-  }
-
-  if (normalizedPageComparable.includes(comparableQuote)) {
-    return true;
-  }
-
-  const overlap = tokenOverlap(comparableQuote, normalizedPageComparable);
-  return overlap.leftCoverage >= 0.9;
-}
-
-function hasValidMisinformationSignals(rawFinding: RawFinding): boolean {
-  if (rawFinding.confidence < MISINFORMATION_THRESHOLD) {
-    return false;
-  }
-  if (!rawFinding.correction || rawFinding.correction.length < 12) {
-    return false;
-  }
-
-  if (isNearDuplicate(rawFinding.quote, rawFinding.correction)) {
-    return false;
-  }
-
-  const reasoningText = normalizeText(`${rawFinding.rationale} ${rawFinding.correction}`);
-  const affirmsQuote = hasPattern(AFFIRMING_PATTERNS, reasoningText);
-  const disputesQuote = hasPattern(MISINFORMATION_PATTERNS, reasoningText);
-
-  if (affirmsQuote && !disputesQuote) {
-    return false;
-  }
-
-  if (!disputesQuote) {
-    return false;
-  }
-
-  return true;
-}
-
-function inferSubtypeForIssue(
-  issue: 'fallacy' | 'bias',
-  rawSubtype: string | undefined,
-  rationale: string,
-  quote: string,
-): string | undefined {
-  const normalizedRawSubtype = normalizeSubtype(rawSubtype);
-  if (issue === 'fallacy' && FALLACY_SUBTYPES.has(normalizedRawSubtype)) {
-    return normalizedRawSubtype;
-  }
-  if (issue === 'bias' && BIAS_SUBTYPES.has(normalizedRawSubtype)) {
-    return normalizedRawSubtype;
-  }
-
-  const haystack = normalizeText(`${rawSubtype ?? ''} ${rationale} ${quote}`);
-  const patterns = issue === 'fallacy' ? FALLACY_PATTERNS : BIAS_PATTERNS;
-
-  for (const [subtype, checks] of Object.entries(patterns)) {
-    if (checks.some((pattern) => pattern.test(haystack))) {
-      return subtype;
-    }
-  }
-
-  return issue === 'bias' ? 'loaded language' : 'hasty generalization';
-}
-
-function sanitizeRawFinding(
-  rawFinding: RawFinding,
-  normalizedPageText: string,
-  normalizedPageComparable: string,
-): RawFinding | null {
-  if (!quoteAppearsOnPage(rawFinding.quote, normalizedPageText, normalizedPageComparable)) {
-    return null;
-  }
-
-  if (!rawFinding.rationale || rawFinding.rationale.length < 16) {
-    return null;
-  }
-
-  const sanitized: RawFinding = {
-    ...rawFinding,
-    issueTypes: [...rawFinding.issueTypes],
-  };
-
-  if (sanitized.issueTypes.includes('misinformation')) {
-    const validMisinformation = hasValidMisinformationSignals(sanitized);
-    if (!validMisinformation) {
-      sanitized.issueTypes = sanitized.issueTypes.filter((issue) => issue !== 'misinformation');
-      sanitized.correction = undefined;
-    }
-  }
-
-  if (sanitized.issueTypes.length === 0) {
-    return null;
-  }
-
-  if (sanitized.confidence < ARGUMENT_THRESHOLD) {
-    sanitized.issueTypes = sanitized.issueTypes.filter((issue) => issue === 'misinformation');
-  }
-
-  const hasFallacy = sanitized.issueTypes.includes('fallacy');
-  const hasBias = sanitized.issueTypes.includes('bias');
-  if (hasFallacy && hasBias) {
-    // Keep one argument class because each finding supports a single subtype field.
-    sanitized.issueTypes = sanitized.issueTypes.filter((issue) => issue !== 'fallacy');
-  }
-
-  if (sanitized.issueTypes.includes('fallacy')) {
-    const subtype = inferSubtypeForIssue(
-      'fallacy',
-      sanitized.subtype,
-      sanitized.rationale,
-      sanitized.quote,
-    );
-    if (!subtype || !FALLACY_SUBTYPES.has(subtype)) {
-      sanitized.issueTypes = sanitized.issueTypes.filter((issue) => issue !== 'fallacy');
-    } else {
-      sanitized.subtype = subtype;
-    }
-  }
-
-  if (sanitized.issueTypes.includes('bias')) {
-    const subtype = inferSubtypeForIssue(
-      'bias',
-      sanitized.subtype,
-      sanitized.rationale,
-      sanitized.quote,
-    );
-    if (!subtype || !BIAS_SUBTYPES.has(subtype)) {
-      sanitized.issueTypes = sanitized.issueTypes.filter((issue) => issue !== 'bias');
-    } else {
-      sanitized.subtype = subtype;
-    }
-  }
-
-  if (sanitized.issueTypes.length === 0) {
-    return null;
-  }
-
-  return sanitized;
+  return mappings.get(subtype) ?? subtype;
 }
 
 function toIssueTypes(value: unknown): IssueType[] {
@@ -418,54 +139,305 @@ function toConfidence(value: unknown): number {
   return Math.max(0, Math.min(1, asNumber));
 }
 
-function buildCandidatePrompt(url: string, title: string, content: string): string {
+function toTimestampLabel(value: unknown): string | undefined {
+  const normalized = String(value ?? '')
+    .trim()
+    .replace(/\s+/g, ' ');
+  if (!normalized) {
+    return undefined;
+  }
+  if (!/^\d{1,2}:\d{2}(?::\d{2})?$/.test(normalized)) {
+    return undefined;
+  }
+  return normalized;
+}
+
+function buildTranscriptContext(segments: TranscriptSegment[]): string {
+  return segments
+    .slice(0, MAX_TRANSCRIPT_PROMPT_SEGMENTS)
+    .map((segment) => `[${segment.startLabel}] ${segment.text}`)
+    .join('\n');
+}
+
+function buildCandidatePrompt(options: {
+  url: string;
+  title: string;
+  content: string;
+  transcriptSegments?: TranscriptSegment[];
+}): string {
+  const { url, title, content, transcriptSegments } = options;
+  const isYouTube = (transcriptSegments?.length ?? 0) > 0;
+
   return [
-    'You are a strict but critical claim miner focused on misinformation, fallacies, and bias.',
-    'Extract concise, direct quotes from the page that could be problematic or manipulative.',
-    'For opinion writing, aggressively capture loaded rhetoric and character attacks as bias/fallacy candidates.',
+    'You are a sensitivity-first claim miner focused on misinformation, fallacies, and bias.',
+    'Extract concise, direct quotes from the page that are potentially problematic.',
     'Do not summarize the page.',
     'Return valid JSON with this shape only:',
-    '{"candidates":[{"quote":"string","issueHints":["misinformation"|"fallacy"|"bias"],"subtypeHint":"string optional","reason":"string optional"}]}',
+    isYouTube
+      ? '{"candidates":[{"quote":"string","timestampLabel":"m:ss or h:mm:ss optional","issueHints":["misinformation"|"fallacy"|"bias"],"subtypeHint":"string optional","reason":"string optional"}]}'
+      : '{"candidates":[{"quote":"string","issueHints":["misinformation"|"fallacy"|"bias"],"subtypeHint":"string optional","reason":"string optional"}]}',
     'Rules:',
-    '- Keep each quote under 260 characters.',
+    '- Keep each quote under 220 characters.',
     '- Return at most 24 candidates.',
-    '- Prefer recall over precision at this stage.',
-    '- Include medium-strength concerns; do not require certain falsity for bias/fallacy.',
+    '- Prefer recall over strict precision; include medium-confidence likely issues.',
     '- issueHints can include multiple values.',
+    ...(isYouTube
+      ? [
+          '- For each quote, include timestampLabel when a matching transcript timestamp is available.',
+          '- timestampLabel must match transcript labels exactly.',
+        ]
+      : []),
     `URL: ${url}`,
     `TITLE: ${title}`,
-    'PAGE_TEXT_START',
-    content,
-    'PAGE_TEXT_END',
+    ...(isYouTube
+      ? [
+          'TRANSCRIPT_LINES_START',
+          buildTranscriptContext(transcriptSegments ?? []),
+          'TRANSCRIPT_LINES_END',
+        ]
+      : [
+          'PAGE_TEXT_START',
+          content,
+          'PAGE_TEXT_END',
+        ]),
   ].join('\n');
 }
 
 function buildVerificationPrompt(
-  url: string,
-  title: string,
-  candidates: CandidateClaim[],
+  options: {
+    url: string;
+    title: string;
+    candidates: CandidateClaim[];
+    transcriptSegments?: TranscriptSegment[];
+  },
 ): string {
+  const { url, title, candidates, transcriptSegments } = options;
+  const isYouTube = (transcriptSegments?.length ?? 0) > 0;
+
   return [
-    'You are a critical credibility analyst.',
+    'You are a recall-friendly credibility analyst.',
     'Evaluate each quote for misinformation, logical fallacy, and rhetorical bias.',
-    'For misinformation: include only if highly likely false or misleading.',
-    'For fallacy and bias: use quote-grounded reasoning and allow strong rhetorical indicators.',
+    'For misinformation: include likely false or misleading claims, even if uncertainty exists.',
+    'For fallacy and bias: use quote-grounded reasoning only.',
     'Approved fallacy subtypes: straw man, ad hominem, false dilemma, hasty generalization, slippery slope, appeal to fear.',
     'Approved bias subtypes: loaded language, cherry picking, framing bias, confirmation framed rhetoric.',
     'Return strict JSON with shape:',
-    '{"findings":[{"quote":"string","issueTypes":["misinformation"|"fallacy"|"bias"],"subtype":"string optional","confidence":0.0,"severity":1,"rationale":"string","correction":"string optional"}]}',
+    isYouTube
+      ? '{"findings":[{"quote":"string","timestampLabel":"m:ss or h:mm:ss optional","issueTypes":["misinformation"|"fallacy"|"bias"],"subtype":"string optional","confidence":0.0,"severity":1,"rationale":"string","correction":"string optional"}]}'
+      : '{"findings":[{"quote":"string","issueTypes":["misinformation"|"fallacy"|"bias"],"subtype":"string optional","confidence":0.0,"severity":1,"rationale":"string","correction":"string optional"}]}',
     'Rules:',
-    '- Output medium-to-high confidence items.',
+    '- Output medium or high-confidence items when likely problematic.',
     '- For misinformation include correction.',
-    '- Never label accurate/supported statements as misinformation.',
-    '- If your rationale says a quote is accurate/true/correct, omit it from findings.',
-    '- A correction must materially differ from the quote and explain why the quote is false/misleading.',
-    '- Never echo or paraphrase the same claim as the correction.',
     '- If a quote is not supportable as problematic, omit it.',
+    ...(isYouTube
+      ? [
+          '- Include timestampLabel whenever a quote is tied to a transcript line.',
+          '- timestampLabel must match available transcript labels exactly.',
+        ]
+      : []),
     `URL: ${url}`,
     `TITLE: ${title}`,
     `CANDIDATES_JSON: ${JSON.stringify(candidates)}`,
+    ...(isYouTube
+      ? [
+          'TRANSCRIPT_LINES_START',
+          buildTranscriptContext(transcriptSegments ?? []),
+          'TRANSCRIPT_LINES_END',
+        ]
+      : []),
   ].join('\n');
+}
+
+function buildDirectFindingsPrompt(options: {
+  url: string;
+  title: string;
+  content: string;
+  transcriptSegments?: TranscriptSegment[];
+}): string {
+  const { url, title, content, transcriptSegments } = options;
+  const isYouTube = (transcriptSegments?.length ?? 0) > 0;
+
+  return [
+    'You are a sensitivity-first credibility analyst.',
+    'Find likely misinformation, fallacy, and bias directly from the provided text.',
+    'Use concise, direct quotes from the source text only.',
+    'Return strict JSON only with shape:',
+    isYouTube
+      ? '{"findings":[{"quote":"string","timestampLabel":"m:ss or h:mm:ss optional","issueTypes":["misinformation"|"fallacy"|"bias"],"subtype":"string optional","confidence":0.0,"severity":1,"rationale":"string","correction":"string optional"}]}'
+      : '{"findings":[{"quote":"string","issueTypes":["misinformation"|"fallacy"|"bias"],"subtype":"string optional","confidence":0.0,"severity":1,"rationale":"string","correction":"string optional"}]}',
+    'Rules:',
+    '- Prefer recall over strict precision.',
+    '- Include medium-confidence likely issues.',
+    '- Keep quote text close to source wording.',
+    '- For misinformation, provide correction when possible.',
+    ...(isYouTube
+      ? [
+          '- Include timestampLabel when possible.',
+          '- timestampLabel should match transcript labels when available.',
+        ]
+      : []),
+    `URL: ${url}`,
+    `TITLE: ${title}`,
+    ...(isYouTube
+      ? [
+          'TRANSCRIPT_LINES_START',
+          buildTranscriptContext(transcriptSegments ?? []),
+          'TRANSCRIPT_LINES_END',
+        ]
+      : [
+          'PAGE_TEXT_START',
+          content,
+          'PAGE_TEXT_END',
+        ]),
+  ].join('\n');
+}
+
+function buildContextPrompt(options: {
+  url: string;
+  title: string;
+  content: string;
+  transcriptSegments?: TranscriptSegment[];
+}): string {
+  const { url, title, content, transcriptSegments } = options;
+  const isYouTube = (transcriptSegments?.length ?? 0) > 0;
+
+  return [
+    'You are an article context distiller for fact-check retrieval.',
+    'Extract the main topic context, not rhetorical style details.',
+    'Return strict JSON only with shape:',
+    '{"summary":"string","topicKeywords":["string"],"entityKeywords":["string"]}',
+    'Rules:',
+    '- summary must be one concise sentence (<= 220 chars).',
+    '- topicKeywords: 4 to 8 short terms describing what the page is substantively about.',
+    '- entityKeywords: 0 to 5 proper names directly central to the topic.',
+    '- Avoid generic terms like people/today/article/podcast.',
+    `URL: ${url}`,
+    `TITLE: ${title}`,
+    ...(isYouTube
+      ? [
+          'TRANSCRIPT_LINES_START',
+          buildTranscriptContext(transcriptSegments ?? []),
+          'TRANSCRIPT_LINES_END',
+        ]
+      : [
+          'PAGE_TEXT_START',
+          content,
+          'PAGE_TEXT_END',
+        ]),
+  ].join('\n');
+}
+
+function extractTopicKeywordsFallback(text: string): string[] {
+  const stopWords = new Set([
+    'a',
+    'an',
+    'the',
+    'and',
+    'or',
+    'if',
+    'but',
+    'to',
+    'of',
+    'in',
+    'for',
+    'on',
+    'with',
+    'at',
+    'by',
+    'from',
+    'as',
+    'that',
+    'this',
+    'these',
+    'those',
+    'is',
+    'are',
+    'was',
+    'were',
+    'be',
+    'been',
+    'being',
+    'it',
+    'its',
+    'they',
+    'them',
+    'their',
+    'you',
+    'your',
+    'we',
+    'our',
+    'said',
+    'says',
+    'reported',
+    'podcast',
+    'article',
+  ]);
+
+  const counts = new Map<string, number>();
+  const words = text
+    .toLowerCase()
+    .replace(/[^\w\s-]/g, ' ')
+    .split(/\s+/)
+    .filter((word) => word.length > 3 && !stopWords.has(word));
+
+  for (const word of words) {
+    counts.set(word, (counts.get(word) ?? 0) + 1);
+  }
+
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 8)
+    .map(([word]) => word);
+}
+
+function extractEntityKeywordsFallback(text: string): string[] {
+  const matches = text.match(/\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2}\b/g) ?? [];
+  const banned = new Set(['The', 'This', 'That', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday']);
+  const filtered = matches
+    .map((name) => name.trim())
+    .filter((name) => name.length >= 3 && !banned.has(name));
+  return Array.from(new Set(filtered)).slice(0, 5);
+}
+
+function fallbackPageContext(title: string, text: string): PageContext {
+  const summarySource = text.replace(/\s+/g, ' ').trim();
+  const shortSummary = summarySource
+    ? summarySource.slice(0, 220).replace(/\s+\S*$/, '').trim()
+    : title;
+  return {
+    summary: shortSummary || title,
+    topicKeywords: extractTopicKeywordsFallback(`${title} ${text}`),
+    entityKeywords: extractEntityKeywordsFallback(`${title} ${text}`),
+  };
+}
+
+function coerceStringList(value: unknown, maxItems: number): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => String(item ?? '').trim())
+    .filter((item) => item.length >= 2)
+    .slice(0, maxItems);
+}
+
+function coercePageContext(payload: unknown, fallback: PageContext): PageContext {
+  if (!payload || typeof payload !== 'object') {
+    return fallback;
+  }
+  const summary = String((payload as { summary?: unknown }).summary ?? '').trim();
+  const topicKeywords = coerceStringList(
+    (payload as { topicKeywords?: unknown }).topicKeywords,
+    8,
+  );
+  const entityKeywords = coerceStringList(
+    (payload as { entityKeywords?: unknown }).entityKeywords,
+    5,
+  );
+
+  return {
+    summary: summary || fallback.summary,
+    topicKeywords: topicKeywords.length > 0 ? topicKeywords : fallback.topicKeywords,
+    entityKeywords: entityKeywords.length > 0 ? entityKeywords : fallback.entityKeywords,
+  };
 }
 
 function coerceCandidates(payload: unknown): CandidateClaim[] {
@@ -482,8 +454,8 @@ function coerceCandidates(payload: unknown): CandidateClaim[] {
     if (!item || typeof item !== 'object') {
       continue;
     }
-    const quote = String((item as { quote?: unknown }).quote ?? '').trim();
-    if (quote.length < 16) {
+    const quote = normalizeQuoteText(String((item as { quote?: unknown }).quote ?? ''));
+    if (quote.length < 18) {
       continue;
     }
     const issueHints = toIssueTypes((item as { issueHints?: unknown }).issueHints);
@@ -495,9 +467,10 @@ function coerceCandidates(payload: unknown): CandidateClaim[] {
       issueHints,
       subtypeHint:
         String((item as { subtypeHint?: unknown }).subtypeHint ?? '').trim() || undefined,
+      timestampLabel: toTimestampLabel((item as { timestampLabel?: unknown }).timestampLabel),
       reason: String((item as { reason?: unknown }).reason ?? '').trim() || undefined,
     });
-    if (candidates.length >= 24) {
+    if (candidates.length >= 14) {
       break;
     }
   }
@@ -518,7 +491,7 @@ function coerceRawFindings(payload: unknown): RawFinding[] {
     if (!item || typeof item !== 'object') {
       continue;
     }
-    const quote = String((item as { quote?: unknown }).quote ?? '').trim();
+    const quote = normalizeQuoteText(String((item as { quote?: unknown }).quote ?? ''));
     const issueTypes = toIssueTypes((item as { issueTypes?: unknown }).issueTypes);
     if (!quote || issueTypes.length === 0) {
       continue;
@@ -532,9 +505,141 @@ function coerceRawFindings(payload: unknown): RawFinding[] {
       severity: toSeverity((item as { severity?: unknown }).severity),
       rationale: String((item as { rationale?: unknown }).rationale ?? '').trim(),
       correction: String((item as { correction?: unknown }).correction ?? '').trim() || undefined,
+      timestampLabel: toTimestampLabel((item as { timestampLabel?: unknown }).timestampLabel),
     });
   }
   return normalized;
+}
+
+function quoteLikelyPresent(normalizedQuote: string, normalizedPageText: string): boolean {
+  if (!normalizedQuote) return false;
+  if (normalizedPageText.includes(normalizedQuote)) return true;
+
+  const words = normalizedQuote
+    .replace(/[^\w\s]/g, ' ')
+    .split(/\s+/)
+    .filter((word) => word.length > 2);
+  if (words.length === 0) return false;
+
+  const head = words.slice(0, Math.min(4, words.length)).join(' ');
+  const tail = words.slice(Math.max(0, words.length - 4)).join(' ');
+  if (head && tail && normalizedPageText.includes(head) && normalizedPageText.includes(tail)) {
+    return true;
+  }
+
+  const matched = words.filter((word) => normalizedPageText.includes(word)).length;
+  return matched / words.length >= 0.72;
+}
+
+function meetsPrecisionRules(
+  rawFinding: RawFinding,
+  normalizedPageText: string,
+  isYouTube = false,
+): boolean {
+  const normalizedQuote = normalizeText(rawFinding.quote);
+  const minQuoteLength = isYouTube ? 8 : 12;
+  if (normalizedQuote.length < minQuoteLength || !quoteLikelyPresent(normalizedQuote, normalizedPageText)) {
+    return false;
+  }
+
+  const minRationaleLength = isYouTube ? 5 : 8;
+  if (!rawFinding.rationale || rawFinding.rationale.length < minRationaleLength) {
+    return false;
+  }
+
+  if (rawFinding.issueTypes.includes('misinformation')) {
+    const threshold = isYouTube ? YOUTUBE_MISINFORMATION_THRESHOLD : MISINFORMATION_THRESHOLD;
+    if (rawFinding.confidence < threshold) {
+      return false;
+    }
+    if (!isYouTube && (!rawFinding.correction || rawFinding.correction.length < 8)) {
+      return false;
+    }
+    if (
+      isYouTube &&
+      (!rawFinding.correction || rawFinding.correction.length < 6) &&
+      rawFinding.confidence < threshold + 0.15
+    ) {
+      return false;
+    }
+  }
+
+  const argumentIssues = rawFinding.issueTypes.filter(
+    (type) => type === 'fallacy' || type === 'bias',
+  );
+  if (argumentIssues.length > 0) {
+    const threshold = isYouTube ? YOUTUBE_ARGUMENT_THRESHOLD : ARGUMENT_THRESHOLD;
+    if (rawFinding.confidence < threshold) {
+      return false;
+    }
+
+    const subtype = canonicalizeSubtype(rawFinding.subtype);
+    if (rawFinding.issueTypes.includes('fallacy') && subtype && FALLACY_SUBTYPES.has(subtype)) {
+      rawFinding.subtype = subtype;
+    }
+    if (rawFinding.issueTypes.includes('bias') && subtype && BIAS_SUBTYPES.has(subtype)) {
+      rawFinding.subtype = subtype;
+    }
+  }
+
+  return true;
+}
+
+function meetsFallbackRules(rawFinding: RawFinding, normalizedPageText: string): boolean {
+  const normalizedQuote = normalizeText(rawFinding.quote);
+  if (normalizedQuote.length < 10 || !quoteLikelyPresent(normalizedQuote, normalizedPageText)) {
+    return false;
+  }
+  if (!rawFinding.rationale || rawFinding.rationale.length < 6) {
+    return false;
+  }
+  return rawFinding.confidence >= 0.4;
+}
+
+function meetsFallbackRulesYouTube(rawFinding: RawFinding, normalizedPageText: string): boolean {
+  const normalizedQuote = normalizeText(rawFinding.quote);
+  if (normalizedQuote.length < 6 || !quoteLikelyPresent(normalizedQuote, normalizedPageText)) {
+    return false;
+  }
+  if (!rawFinding.rationale || rawFinding.rationale.length < 4) {
+    return false;
+  }
+  return rawFinding.confidence >= 0.28;
+}
+
+function segmentForQuote(quote: string, segments: TranscriptSegment[]): TranscriptSegment | null {
+  const normalizedQuote = normalizeText(quote);
+  if (!normalizedQuote) return null;
+  for (const segment of segments) {
+    const normalizedSegment = normalizeText(segment.text);
+    if (normalizedSegment.includes(normalizedQuote) || normalizedQuote.includes(normalizedSegment)) {
+      return segment;
+    }
+  }
+  return null;
+}
+
+function attachTranscriptTimestamps(
+  findings: Finding[],
+  transcriptSegments: TranscriptSegment[],
+): Finding[] {
+  if (transcriptSegments.length === 0) return findings;
+
+  return findings.map((finding) => {
+    const byLabel = nearestSegmentForTimestampLabel(finding.timestampLabel, transcriptSegments);
+    const byQuote = segmentForQuote(finding.quote, transcriptSegments);
+    const segment = byLabel ?? byQuote;
+
+    if (!segment) {
+      return finding;
+    }
+
+    return {
+      ...finding,
+      timestampSec: segment.startSec,
+      timestampLabel: segment.startLabel,
+    };
+  });
 }
 
 function mergeFindings(rawFindings: RawFinding[]): Finding[] {
@@ -554,6 +659,7 @@ function mergeFindings(rawFindings: RawFinding[]): Finding[] {
         severity: rawFinding.severity,
         rationale: rawFinding.rationale,
         correction: rawFinding.correction,
+        timestampLabel: rawFinding.timestampLabel,
       });
       continue;
     }
@@ -570,6 +676,9 @@ function mergeFindings(rawFindings: RawFinding[]): Finding[] {
     }
     if (rawFinding.rationale.length > existing.rationale.length) {
       existing.rationale = rawFinding.rationale;
+    }
+    if (!existing.timestampLabel && rawFinding.timestampLabel) {
+      existing.timestampLabel = rawFinding.timestampLabel;
     }
   }
 
@@ -600,60 +709,145 @@ function buildSummary(findings: Finding[]): ScanSummary {
   };
 }
 
+async function callOpenRouterJsonSafe<T>(options: {
+  apiKey: string;
+  prompt: string;
+  fallback: T;
+}): Promise<T> {
+  try {
+    return await callOpenRouterJson<T>({
+      apiKey: options.apiKey,
+      prompt: options.prompt,
+    });
+  } catch {
+    return options.fallback;
+  }
+}
+
 export async function analyzeClaims(options: {
   apiKey: string;
   tabId: number;
   url: string;
   title: string;
   text: string;
+  transcriptSegments?: TranscriptSegment[];
   truncated: boolean;
   analyzedChars: number;
 }): Promise<ScanReport> {
-  const { apiKey, tabId, url, title, text, truncated, analyzedChars } = options;
+  const {
+    apiKey,
+    tabId,
+    url,
+    title,
+    text,
+    transcriptSegments = [],
+    truncated,
+    analyzedChars,
+  } = options;
   const normalizedPageText = normalizeText(text);
-  const normalizedPageComparable = normalizeComparableText(text);
+  const isYouTube = transcriptSegments.length > 0;
+  const contextText = text.slice(0, MAX_CONTEXT_CHARS);
+  const contextFallback = fallbackPageContext(title, contextText);
+  const contextPrompt = buildContextPrompt({
+    url,
+    title,
+    content: contextText,
+    transcriptSegments,
+  });
+  const pageContextRaw = await callOpenRouterJsonSafe<{
+    summary?: unknown;
+    topicKeywords?: unknown;
+    entityKeywords?: unknown;
+  }>({
+    apiKey,
+    prompt: contextPrompt,
+    fallback: {
+      summary: contextFallback.summary,
+      topicKeywords: contextFallback.topicKeywords,
+      entityKeywords: contextFallback.entityKeywords,
+    },
+  });
+  const pageContext = coercePageContext(pageContextRaw, contextFallback);
 
-  const candidatePrompt = buildCandidatePrompt(url, title, text);
-  const candidateResponse = await callOpenRouterJson<{ candidates?: unknown }>({
+  const candidatePrompt = buildCandidatePrompt({
+    url,
+    title,
+    content: text,
+    transcriptSegments,
+  });
+  const candidateResponse = await callOpenRouterJsonSafe<{ candidates?: unknown }>({
     apiKey,
     prompt: candidatePrompt,
+    fallback: { candidates: [] },
   });
   const candidates = coerceCandidates(candidateResponse);
-  let rawFindings: RawFinding[] = [];
-  if (candidates.length > 0) {
-    const verificationPrompt = buildVerificationPrompt(url, title, candidates);
-    const verificationResponse = await callOpenRouterJson<{ findings?: unknown }>({
-      apiKey,
-      prompt: verificationPrompt,
+
+  if (candidates.length === 0) {
+    const directPrompt = buildDirectFindingsPrompt({
+      url,
+      title,
+      content: text,
+      transcriptSegments,
     });
-    rawFindings = coerceRawFindings(verificationResponse);
+    const directResponse = await callOpenRouterJsonSafe<{ findings?: unknown }>({
+      apiKey,
+      prompt: directPrompt,
+      fallback: { findings: [] },
+    });
+    const directRawFindings = coerceRawFindings(directResponse);
+    const directFiltered = directRawFindings.filter((finding) =>
+      meetsPrecisionRules(finding, normalizedPageText, isYouTube),
+    );
+    const directFallback = directRawFindings.filter((finding) =>
+      isYouTube
+        ? meetsFallbackRulesYouTube(finding, normalizedPageText)
+        : meetsFallbackRules(finding, normalizedPageText),
+    );
+    const selected = directFiltered.length > 0 ? directFiltered : directFallback;
+    const findings = attachTranscriptTimestamps(mergeFindings(selected), transcriptSegments);
+
+    return {
+      tabId,
+      url,
+      title,
+      pageContext,
+      scannedAt: new Date().toISOString(),
+      summary: buildSummary(findings),
+      findings,
+      truncated,
+      analyzedChars,
+    };
   }
 
-  const filtered: RawFinding[] = [];
-  for (const finding of rawFindings) {
-    const sanitized = sanitizeRawFinding(finding, normalizedPageText, normalizedPageComparable);
-    if (sanitized) {
-      filtered.push(sanitized);
-    }
-  }
-  let findings = mergeFindings(filtered);
+  const verificationPrompt = buildVerificationPrompt({
+    url,
+    title,
+    candidates,
+    transcriptSegments,
+  });
+  const verificationResponse = await callOpenRouterJsonSafe<{ findings?: unknown }>({
+    apiKey,
+    prompt: verificationPrompt,
+    fallback: { findings: [] },
+  });
 
-  if (findings.length === 0) {
-    const heuristicRawFindings = buildHeuristicRawFindings(text);
-    const heuristicFiltered: RawFinding[] = [];
-    for (const finding of heuristicRawFindings) {
-      const sanitized = sanitizeRawFinding(finding, normalizedPageText, normalizedPageComparable);
-      if (sanitized) {
-        heuristicFiltered.push(sanitized);
-      }
-    }
-    findings = mergeFindings(heuristicFiltered);
-  }
+  const rawFindings = coerceRawFindings(verificationResponse);
+  const filtered = rawFindings.filter((finding) =>
+    meetsPrecisionRules(finding, normalizedPageText, isYouTube),
+  );
+  const fallback = rawFindings.filter((finding) =>
+    isYouTube
+      ? meetsFallbackRulesYouTube(finding, normalizedPageText)
+      : meetsFallbackRules(finding, normalizedPageText),
+  );
+  const selected = filtered.length > 0 ? filtered : fallback;
+  const findings = attachTranscriptTimestamps(mergeFindings(selected), transcriptSegments);
 
   return {
     tabId,
     url,
     title,
+    pageContext,
     scannedAt: new Date().toISOString(),
     summary: buildSummary(findings),
     findings,
