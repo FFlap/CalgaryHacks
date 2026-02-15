@@ -4,13 +4,11 @@ import {
   Gauge,
   KeyRound,
   LoaderCircle,
-  Radar,
   Search,
   Settings,
   ShieldCheck,
 } from 'lucide-react';
 
-import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import {
   Dialog,
@@ -22,6 +20,7 @@ import {
 } from '@/components/ui/dialog';
 import { Input } from '@/components/ui/input';
 import type {
+  CorroborationItem,
   Finding,
   FindingEvidence,
   IssueType,
@@ -39,15 +38,6 @@ const ext = ((globalThis as any).browser ?? (globalThis as any).chrome) as typeo
 const API_KEY_STORAGE_KEY = 'openrouter_api_key';
 const LEGACY_API_KEY_STORAGE_KEY = 'gemini_api_key';
 const GOOGLE_FACT_CHECK_API_KEY_STORAGE_KEY = 'google_fact_check_api_key';
-const LEGACY_GOOGLE_FACT_CHECK_API_KEY_STORAGE_KEYS = [
-  'google_factcheck_api_key',
-  'googleFactCheckApiKey',
-  'GOOGLE_FACT_CHECK_API_KEY',
-] as const;
-const GOOGLE_FACT_CHECK_API_KEY_STORAGE_KEYS = [
-  GOOGLE_FACT_CHECK_API_KEY_STORAGE_KEY,
-  ...LEGACY_GOOGLE_FACT_CHECK_API_KEY_STORAGE_KEYS,
-] as const;
 
 type ReportResponse = { report: ScanReport | null };
 type SettingsResponse = { hasApiKey: boolean; hasGoogleFactCheckApiKey?: boolean };
@@ -58,38 +48,11 @@ type EvidenceResponse = {
   error?: string;
 };
 type FilterKey = 'all' | IssueType;
-type PopupView = 'review' | 'dashboard';
 type FindingEvidenceState =
   | { status: 'idle' }
   | { status: 'loading' }
   | { status: 'loaded'; evidence: FindingEvidence }
   | { status: 'error'; message: string };
-type DashboardFinding = {
-  quote: string;
-  issueTypes: IssueType[];
-  subtype?: string;
-  confidence: number;
-  severity: number;
-  rationale: string;
-};
-type DashboardPayload = {
-  generatedAt: string;
-  source: {
-    title: string;
-    url: string;
-    scanMessage: string;
-  };
-  summary: {
-    totalFindings: number;
-    misinformationCount: number;
-    fallacyCount: number;
-    biasCount: number;
-    averageConfidence: number;
-    averageSeverity: number;
-  };
-  biasSubtypes: Array<{ subtype: string; count: number }>;
-  findings: DashboardFinding[];
-};
 
 const runningStates = new Set<ScanStatus['state']>(['extracting', 'analyzing', 'highlighting']);
 
@@ -183,9 +146,9 @@ function labelForType(issue: IssueType) {
 }
 
 function issueColor(issue: IssueType) {
-  if (issue === 'misinformation') return 'bg-red-500/10 text-red-700 border-red-300/60';
-  if (issue === 'fallacy') return 'bg-amber-500/10 text-amber-700 border-amber-300/60';
-  return 'bg-sky-500/10 text-sky-700 border-sky-300/60';
+  if (issue === 'misinformation') return 'issue-badge--misinfo';
+  if (issue === 'fallacy') return 'issue-badge--fallacy';
+  return 'issue-badge--bias';
 }
 
 function verificationPillClass(code: VerificationCode) {
@@ -206,85 +169,19 @@ function formatEvidenceDate(dateValue?: string) {
   });
 }
 
-interface TrustedSourceCard {
-  id: string;
-  source: string;
-  title: string;
-  snippet?: string;
-  url: string;
-  linkLabel: string;
-  dateLabel?: string;
-  verdictCode?: VerificationCode;
-  verdictLabel?: string;
-  auxLabel?: string;
-}
-
-function buildTrustedSourceCards(evidence: FindingEvidence): TrustedSourceCard[] {
-  const cards: TrustedSourceCard[] = [];
-
-  evidence.factChecks.forEach((match, index) => {
-    cards.push({
-      id: `factcheck:${index}:${match.reviewUrl}`,
-      source: match.publisher || 'Fact-check',
-      title: match.reviewTitle,
-      snippet: match.claimText ? `Claim: ${match.claimText}` : undefined,
-      url: match.reviewUrl,
-      linkLabel: 'Open source',
-      dateLabel: formatEvidenceDate(match.reviewDate),
-      verdictCode: match.normalizedVerdict === 'unknown' ? 'unverified' : match.normalizedVerdict,
-      verdictLabel: match.textualRating || match.normalizedVerdict,
-    });
-  });
-
-  evidence.corroboration.wikipedia.forEach((item, index) => {
-    cards.push({
-      id: `wikipedia:${index}:${item.url}`,
-      source: item.source,
-      title: item.title,
-      snippet: item.snippet,
-      url: item.url,
-      linkLabel: 'Open source',
-    });
-  });
-
-  evidence.corroboration.wikidata.forEach((item, index) => {
-    cards.push({
-      id: `wikidata:${index}:${item.url}`,
-      source: item.source,
-      title: item.title,
-      snippet: item.snippet,
-      url: item.url,
-      linkLabel: 'Open source',
-    });
-  });
-
-  evidence.corroboration.pubmed.forEach((item, index) => {
-    cards.push({
-      id: `pubmed:${index}:${item.url}`,
-      source: item.source,
-      title: item.title,
-      snippet: item.snippet,
-      url: item.url,
-      linkLabel: 'Open source',
-    });
-  });
-
-  evidence.gdeltArticles.forEach((article, index) => {
-    cards.push({
-      id: `gdelt:${index}:${article.url}`,
-      source: article.domain || 'GDELT',
-      title: article.title,
-      url: article.url,
-      linkLabel: 'Open source',
-      dateLabel: formatEvidenceDate(article.seenDate),
-      auxLabel:
-        typeof article.tone === 'number'
-          ? `Tone ${article.tone > 0 ? '+' : ''}${article.tone.toFixed(1)}`
-          : undefined,
-    });
-  });
-
-  return cards;
+function renderCorroborationRows(rows: CorroborationItem[]) {
+  return rows.map((item) => (
+    <article key={`${item.source}-${item.url}`} className="evidence-source-card">
+      <div className="evidence-source-card-head">
+        <span className="evidence-source-chip">{item.source}</span>
+      </div>
+      <p className="evidence-source-title">{item.title}</p>
+      {item.snippet && <p className="evidence-source-snippet">{item.snippet}</p>}
+      <a href={item.url} target="_blank" rel="noopener noreferrer" className="evidence-source-link">
+        Open source
+      </a>
+    </article>
+  ));
 }
 
 function stateLabel(state: ScanStatus['state']) {
@@ -355,76 +252,18 @@ function getStepInfo(state: ScanStatus['state']) {
   return null;
 }
 
-function trimText(value: string, maxLength: number): string {
-  if (value.length <= maxLength) return value;
-  return `${value.slice(0, Math.max(0, maxLength - 1)).trimEnd()}...`;
-}
-
-function formatDashboardTimestamp(value: string): string {
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) return 'Updated now';
-  return `Updated ${parsed.toLocaleString('en-US', {
-    month: 'short',
-    day: 'numeric',
-    hour: 'numeric',
-    minute: '2-digit',
-  })}`;
-}
-
-function buildDashboardPayload(report: ScanReport | null, scanStatus: ScanStatus): DashboardPayload {
-  const findings = report?.findings ?? [];
-  const sortedFindings = [...findings].sort((left, right) => {
-    if (left.severity !== right.severity) return right.severity - left.severity;
-    return right.confidence - left.confidence;
-  });
-
-  const topFindings = sortedFindings.slice(0, 12).map((finding) => ({
-    quote: trimText(finding.quote, 260),
-    issueTypes: finding.issueTypes,
-    subtype: finding.subtype,
-    confidence: Number(finding.confidence.toFixed(3)),
-    severity: finding.severity,
-    rationale: trimText(finding.rationale, 320),
-  }));
-
-  const biasSubtypeCounts = new Map<string, number>();
-  for (const finding of findings) {
-    if (!finding.issueTypes.includes('bias')) continue;
-    const subtype = (finding.subtype || 'unspecified').toLowerCase().trim();
-    biasSubtypeCounts.set(subtype, (biasSubtypeCounts.get(subtype) ?? 0) + 1);
+function isYouTubeTabUrl(url?: string | null): boolean {
+  if (!url) return false;
+  try {
+    const parsed = new URL(url);
+    const host = parsed.hostname.toLowerCase();
+    if (!['www.youtube.com', 'youtube.com', 'm.youtube.com', 'music.youtube.com'].includes(host)) {
+      return false;
+    }
+    return parsed.pathname === '/watch' && Boolean(parsed.searchParams.get('v'));
+  } catch {
+    return false;
   }
-  const biasSubtypes = [...biasSubtypeCounts.entries()]
-    .map(([subtype, count]) => ({ subtype, count }))
-    .sort((left, right) => right.count - left.count)
-    .slice(0, 8);
-
-  const averageConfidence =
-    findings.length > 0
-      ? findings.reduce((sum, finding) => sum + finding.confidence, 0) / findings.length
-      : 0;
-  const averageSeverity =
-    findings.length > 0
-      ? findings.reduce((sum, finding) => sum + finding.severity, 0) / findings.length
-      : 0;
-
-  return {
-    generatedAt: new Date().toISOString(),
-    source: {
-      title: report?.title || 'No page scanned yet',
-      url: report?.url || '',
-      scanMessage: scanStatus.message || 'Ready to scan',
-    },
-    summary: {
-      totalFindings: report?.summary.totalFindings ?? findings.length,
-      misinformationCount: report?.summary.misinformationCount ?? 0,
-      fallacyCount: report?.summary.fallacyCount ?? 0,
-      biasCount: report?.summary.biasCount ?? 0,
-      averageConfidence: Number(averageConfidence.toFixed(3)),
-      averageSeverity: Number(averageSeverity.toFixed(2)),
-    },
-    biasSubtypes,
-    findings: topFindings,
-  };
 }
 
 function StepProgressRing({
@@ -531,9 +370,6 @@ function SettingsModal({
       const trimmed = googleFactCheckApiKey.trim();
       await ext.storage.local.set({
         [GOOGLE_FACT_CHECK_API_KEY_STORAGE_KEY]: trimmed,
-        ...Object.fromEntries(
-          LEGACY_GOOGLE_FACT_CHECK_API_KEY_STORAGE_KEYS.map((key) => [key, trimmed]),
-        ),
       });
       await sendMessage<{ ok: boolean; hasGoogleFactCheckApiKey: boolean }>({
         type: 'SAVE_GOOGLE_FACT_CHECK_API_KEY',
@@ -658,30 +494,29 @@ function SettingsModal({
 }
 
 /* ------------------------------------------------------------------ */
-/*  Finding Card (expandable)                                         */
+/*  Finding details + cards                                           */
 /* ------------------------------------------------------------------ */
 
-function FindingCard({
+function FindingDetailBody({
   finding,
-  isExpanded,
-  isFocused,
   evidenceState,
-  onToggle,
   onJump,
   onLoadEvidence,
   onRetryEvidence,
+  stopPropagation = false,
+  layout = 'default',
 }: {
   finding: Finding;
-  isExpanded: boolean;
-  isFocused: boolean;
   evidenceState: FindingEvidenceState;
-  onToggle: () => void;
   onJump: () => void;
   onLoadEvidence: () => void;
   onRetryEvidence: () => void;
+  stopPropagation?: boolean;
+  layout?: 'default' | 'split';
 }) {
   const evidence = evidenceState.status === 'loaded' ? evidenceState.evidence : null;
   const evidenceErrors: Array<[string, string]> = [];
+  const comparisonLabel = finding.subtype?.trim() || null;
   if (evidence) {
     for (const [source, message] of Object.entries(evidence.errors)) {
       if (typeof message === 'string' && message.trim()) {
@@ -689,101 +524,63 @@ function FindingCard({
       }
     }
   }
-  const trustedSourceCards = evidence ? buildTrustedSourceCards(evidence) : [];
 
   return (
-    <article
-      data-testid="finding-card"
-      data-finding-id={finding.id}
-      data-focused={isFocused ? 'true' : 'false'}
-      className={`finding-card ${isFocused ? 'ring-2 ring-amber-400/80 border-amber-400/80' : ''}`}
-    >
-      {/* Collapsed summary — always visible */}
-      <button
-        type="button"
-        onClick={onToggle}
-        className="finding-summary"
-      >
-        <div className="flex flex-1 items-start gap-2 text-left">
-          <div className="mt-0.5 flex shrink-0 flex-wrap gap-1">
-            {finding.issueTypes.map((t) => (
-              <span
-                key={`${finding.id}-${t}`}
-                className={`inline-flex items-center rounded-full border px-1.5 py-px text-[10px] font-semibold leading-tight ${issueColor(t)}`}
-              >
-                {labelForType(t)}
-              </span>
-            ))}
-          </div>
-          <p className="line-clamp-2 text-[13px] leading-snug text-foreground/85">
-            {formatQuoteForDisplay(finding.quote)}
+    <>
+      {/* Severity / confidence bar */}
+      <div className="detail-meta-row">
+        <span className="detail-meta-item">
+          <span className="inline-block size-1.5 rounded-full bg-current opacity-50" />
+          Confidence {Math.round(finding.confidence * 100)}%
+        </span>
+        <span className="detail-meta-item">
+          <span className="inline-block size-1.5 rounded-full bg-current opacity-50" />
+          Severity {finding.severity}/5
+        </span>
+      </div>
+
+      <div className="finding-top-actions">
+        {comparisonLabel && (
+          <span className="finding-category-pill">
+            {comparisonLabel}
+          </span>
+        )}
+        <button
+          type="button"
+          data-testid="jump-to-highlight"
+          onClick={(event) => {
+            if (stopPropagation) event.stopPropagation();
+            onJump();
+          }}
+          className="finding-jump-inline"
+        >
+          Jump to highlight
+        </button>
+      </div>
+
+      {/* Rationale */}
+      <div className="mb-2.5">
+        <p className="section-label">
+          Why this was flagged
+        </p>
+        <p data-testid="finding-rationale" className="detail-text">
+          {finding.rationale}
+        </p>
+      </div>
+
+      {/* Correction */}
+      {finding.correction && (
+        <div className="corr-box">
+          <p className="corr-title">
+            Correction
+          </p>
+          <p className="corr-text">
+            {finding.correction}
           </p>
         </div>
-        <ChevronDown
-          className={`size-3.5 shrink-0 text-muted-foreground transition-transform duration-200 ${isExpanded ? 'rotate-180' : ''}`}
-        />
-      </button>
+      )}
 
-      {/* Expanded detail */}
-      <div
-        className={`finding-detail ${isExpanded ? 'finding-detail--open' : ''}`}
-      >
-        <div className="finding-detail-inner">
-          {/* Severity / confidence bar */}
-          <div className="mb-2.5 flex items-center gap-3 text-[11px] text-muted-foreground">
-            <span className="flex items-center gap-1">
-              <span className="inline-block size-1.5 rounded-full bg-current opacity-50" />
-              Confidence {Math.round(finding.confidence * 100)}%
-            </span>
-            <span className="flex items-center gap-1">
-              <span className="inline-block size-1.5 rounded-full bg-current opacity-50" />
-              Severity {finding.severity}/5
-            </span>
-            {finding.subtype && (
-              <Badge variant="outline" className="h-auto px-1.5 py-0 text-[10px]">
-                {finding.subtype}
-              </Badge>
-            )}
-          </div>
-
-          {/* Rationale */}
-          <div className="mb-2.5">
-            <p className="mb-0.5 text-[10px] font-semibold uppercase tracking-widest text-muted-foreground">
-              Why this was flagged
-            </p>
-            <p data-testid="finding-rationale" className="text-[12.5px] leading-relaxed text-foreground/80">
-              {finding.rationale}
-            </p>
-          </div>
-
-          {/* Correction */}
-          {finding.correction && (
-            <div className="mb-2.5 rounded-md border border-emerald-200/60 bg-emerald-50/50 px-2.5 py-2">
-              <p className="mb-0.5 text-[10px] font-semibold uppercase tracking-widest text-emerald-700/70">
-                Correction
-              </p>
-              <p className="text-[12.5px] leading-relaxed text-emerald-900/80">
-                {finding.correction}
-              </p>
-            </div>
-          )}
-
-          {/* Jump action */}
-          <Button
-            data-testid="jump-to-highlight"
-            size="sm"
-            variant="outline"
-            onClick={(e) => {
-              e.stopPropagation();
-              onJump();
-            }}
-            className="h-7 text-xs"
-          >
-            <Radar className="size-3.5" />
-            Jump to highlight
-          </Button>
-
-          <section className="evidence-panel" data-testid="finding-evidence-panel">
+      <section className="evidence-panel" data-testid="finding-evidence-panel">
             <div className="evidence-panel-head">
               <p className="evidence-panel-title">Trusted sources</p>
               {evidence && (
@@ -793,18 +590,18 @@ function FindingCard({
               )}
             </div>
 
-            {evidenceState.status === 'idle' && (
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={(event) => {
-                  event.stopPropagation();
-                  onLoadEvidence();
-                }}
-                className="h-7 text-xs"
+              {evidenceState.status === 'idle' && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={(event) => {
+                    if (stopPropagation) event.stopPropagation();
+                    onLoadEvidence();
+                  }}
+                  className="h-7 text-xs"
                 data-testid="load-evidence"
               >
-                Find trusted sources
+                Load trusted sources
               </Button>
             )}
 
@@ -823,7 +620,7 @@ function FindingCard({
                   size="sm"
                   variant="outline"
                   onClick={(event) => {
-                    event.stopPropagation();
+                    if (stopPropagation) event.stopPropagation();
                     onRetryEvidence();
                   }}
                   className="h-7 text-xs"
@@ -844,7 +641,7 @@ function FindingCard({
                     type="button"
                     className="evidence-refresh-button"
                     onClick={(event) => {
-                      event.stopPropagation();
+                      if (stopPropagation) event.stopPropagation();
                       onRetryEvidence();
                     }}
                   >
@@ -854,39 +651,93 @@ function FindingCard({
 
                 {!evidence.apiStatus.googleFactCheckConfigured && (
                   <p className="evidence-warning">
-                    Google Fact Check key not detected for this extension profile. Add it in
-                    Settings under Google Fact Check API key (separate from OpenRouter).
+                    Google Fact Check API key is not configured in Settings.
                   </p>
                 )}
 
-                {trustedSourceCards.length === 0 ? (
-                  <p className="evidence-empty">No trusted sources found for this finding.</p>
-                ) : (
-                  <div className="evidence-source-list" data-testid="trusted-source-list">
-                    {trustedSourceCards.map((item) => (
-                      <article key={item.id} className="evidence-source-card">
-                        <div className="evidence-source-card-head">
-                          <span className="evidence-source-chip">{item.source}</span>
-                          {item.verdictCode ? (
-                            <span className={verificationPillClass(item.verdictCode)}>
-                              {item.verdictLabel || item.verdictCode}
+                <div className="evidence-section">
+                  <h4>Fact-check matches</h4>
+                  {evidence.factChecks.length === 0 ? (
+                    <p className="evidence-empty">No direct ClaimReview match found.</p>
+                  ) : (
+                    <div className="evidence-source-list" data-testid="factcheck-list">
+                      {evidence.factChecks.map((match) => (
+                        <article key={`${match.reviewUrl}-${match.publisher}`} className="evidence-source-card">
+                          <div className="evidence-source-card-head">
+                            <span className="evidence-source-chip">{match.publisher}</span>
+                            <span className={verificationPillClass(
+                              match.normalizedVerdict === 'unknown' ? 'unverified' : match.normalizedVerdict,
+                            )}>
+                              {match.textualRating || match.normalizedVerdict}
                             </span>
-                          ) : item.auxLabel ? (
-                            <span className="evidence-source-meta-text">{item.auxLabel}</span>
-                          ) : null}
-                        </div>
-                        <p className="evidence-source-title">{item.title}</p>
-                        {item.snippet && <p className="evidence-source-snippet">{item.snippet}</p>}
-                        <div className="evidence-source-meta">
-                          {item.dateLabel ? <span>{item.dateLabel}</span> : <span />}
-                          <a href={item.url} target="_blank" rel="noopener noreferrer" className="evidence-source-link">
-                            {item.linkLabel}
-                          </a>
-                        </div>
-                      </article>
-                    ))}
-                  </div>
-                )}
+                          </div>
+                          <p className="evidence-source-title">{match.reviewTitle}</p>
+                          {match.claimText && (
+                            <p className="evidence-source-snippet">Claim: {match.claimText}</p>
+                          )}
+                          <div className="evidence-source-meta">
+                            {match.reviewDate && <span>{formatEvidenceDate(match.reviewDate)}</span>}
+                            {match.reviewUrl && (
+                              <a
+                                href={match.reviewUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="evidence-source-link"
+                              >
+                                Open fact-check
+                              </a>
+                            )}
+                          </div>
+                        </article>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                <div className="evidence-section">
+                  <h4>Corroboration sources</h4>
+                  {evidence.corroboration.wikipedia.length === 0 &&
+                  evidence.corroboration.wikidata.length === 0 &&
+                  evidence.corroboration.pubmed.length === 0 ? (
+                    <p className="evidence-empty">No corroboration sources found.</p>
+                  ) : (
+                    <div className="evidence-source-list" data-testid="corroboration-list">
+                      {renderCorroborationRows(evidence.corroboration.wikipedia)}
+                      {renderCorroborationRows(evidence.corroboration.wikidata)}
+                      {renderCorroborationRows(evidence.corroboration.pubmed)}
+                    </div>
+                  )}
+                </div>
+
+                <div className="evidence-section">
+                  <h4>Related reporting (GDELT)</h4>
+                  {evidence.gdeltArticles.length === 0 ? (
+                    <p className="evidence-empty">No related GDELT articles found.</p>
+                  ) : (
+                    <div className="evidence-source-list" data-testid="gdelt-list">
+                      {evidence.gdeltArticles.map((article) => (
+                        <article key={article.url} className="evidence-source-card">
+                          <div className="evidence-source-card-head">
+                            <span className="evidence-source-chip">{article.domain}</span>
+                            {typeof article.tone === 'number' && (
+                              <span className="evidence-source-meta-text">
+                                Tone {article.tone > 0 ? '+' : ''}
+                                {article.tone.toFixed(1)}
+                              </span>
+                            )}
+                          </div>
+                          <p className="evidence-source-title">{article.title}</p>
+                          <div className="evidence-source-meta">
+                            {article.seenDate && <span>{formatEvidenceDate(article.seenDate)}</span>}
+                            <a href={article.url} target="_blank" rel="noopener noreferrer" className="evidence-source-link">
+                              Open article
+                            </a>
+                          </div>
+                        </article>
+                      ))}
+                    </div>
+                  )}
+                </div>
 
                 {evidenceErrors.length > 0 && (
                   <div className="evidence-partial-errors" data-testid="evidence-partial-errors">
@@ -897,8 +748,129 @@ function FindingCard({
                 )}
               </div>
             )}
-          </section>
+      </section>
+    </>
+  );
+}
+
+function FindingCard({
+  finding,
+  isExpanded,
+  isFocused,
+  evidenceState,
+  onToggle,
+  onJump,
+  onLoadEvidence,
+  onRetryEvidence,
+}: {
+  finding: Finding;
+  isExpanded: boolean;
+  isFocused: boolean;
+  evidenceState: FindingEvidenceState;
+  onToggle: () => void;
+  onJump: () => void;
+  onLoadEvidence: () => void;
+  onRetryEvidence: () => void;
+}) {
+  return (
+    <article
+      data-testid="finding-card"
+      data-finding-id={finding.id}
+      data-focused={isFocused ? 'true' : 'false'}
+      className="finding-card"
+    >
+      {/* Collapsed summary — always visible */}
+      <button
+        type="button"
+        onClick={onToggle}
+        className="finding-summary"
+      >
+        <div className="flex flex-1 items-start gap-2 text-left">
+          <div className="mt-0.5 flex shrink-0 flex-wrap gap-1">
+            {finding.issueTypes.map((t) => (
+              <span
+                key={`${finding.id}-${t}`}
+                className={`issue-badge ${issueColor(t)}`}
+              >
+                {labelForType(t)}
+              </span>
+            ))}
+          </div>
+          <p className="finding-summary-quote">
+            {formatQuoteForDisplay(finding.quote)}
+          </p>
         </div>
+        <ChevronDown
+          className={`size-3.5 shrink-0 text-muted-foreground transition-transform duration-200 ${isExpanded ? 'rotate-180' : ''}`}
+        />
+      </button>
+
+      {/* Expanded detail */}
+      <div
+        className={`finding-detail ${isExpanded ? 'finding-detail--open' : ''}`}
+      >
+        <div className="finding-detail-inner">
+          <FindingDetailBody
+            finding={finding}
+            evidenceState={evidenceState}
+            onJump={onJump}
+            onLoadEvidence={onLoadEvidence}
+            onRetryEvidence={onRetryEvidence}
+            stopPropagation
+          />
+        </div>
+      </div>
+    </article>
+  );
+}
+
+function SplitFindingDetail({
+  finding,
+  isFocused,
+  evidenceState,
+  onJump,
+  onLoadEvidence,
+  onRetryEvidence,
+}: {
+  finding: Finding;
+  isFocused: boolean;
+  evidenceState: FindingEvidenceState;
+  onJump: () => void;
+  onLoadEvidence: () => void;
+  onRetryEvidence: () => void;
+}) {
+  return (
+    <article
+      data-testid="finding-card"
+      data-finding-id={finding.id}
+      data-focused={isFocused ? 'true' : 'false'}
+      className="screen6-detail-card"
+    >
+      <div className="screen6-claim-card">
+        <div className="screen6-detail-head">
+          <div className="mt-0.5 flex shrink-0 flex-wrap gap-1">
+            {finding.issueTypes.map((issue) => (
+              <span
+                key={`${finding.id}-${issue}`}
+                className={`issue-badge ${issueColor(issue)}`}
+              >
+                {labelForType(issue)}
+              </span>
+            ))}
+          </div>
+        </div>
+        <p className="screen6-detail-quote">{formatQuoteForDisplay(finding.quote)}</p>
+      </div>
+
+      <div className="screen6-detail-content">
+        <FindingDetailBody
+          finding={finding}
+          evidenceState={evidenceState}
+          onJump={onJump}
+          onLoadEvidence={onLoadEvidence}
+          onRetryEvidence={onRetryEvidence}
+          layout="split"
+        />
       </div>
     </article>
   );
@@ -910,6 +882,7 @@ function FindingCard({
 
 function App() {
   const [activeTabId, setActiveTabId] = useState<number | null>(null);
+  const [activeTabUrl, setActiveTabUrl] = useState<string | null>(null);
   const [hasApiKey, setHasApiKey] = useState(false);
   const [hasGoogleFactCheckApiKey, setHasGoogleFactCheckApiKey] = useState(false);
   const [scanStatus, setScanStatus] = useState<ScanStatus>({
@@ -920,9 +893,10 @@ function App() {
   });
   const [report, setReport] = useState<ScanReport | null>(null);
   const [filter, setFilter] = useState<FilterKey>('all');
-  const [popupView, setPopupView] = useState<PopupView>('review');
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [focusedFindingId, setFocusedFindingId] = useState<string | null>(null);
+  const [appliedFocusFindingId, setAppliedFocusFindingId] = useState<string | null>(null);
+  const [activeFindingId, setActiveFindingId] = useState<string | null>(null);
   const [evidenceByFinding, setEvidenceByFinding] = useState<Record<string, FindingEvidenceState>>({});
 
   /* ---- data loading ---- */
@@ -990,7 +964,7 @@ function App() {
           ext.storage.local.get([
             API_KEY_STORAGE_KEY,
             LEGACY_API_KEY_STORAGE_KEY,
-            ...GOOGLE_FACT_CHECK_API_KEY_STORAGE_KEYS,
+            GOOGLE_FACT_CHECK_API_KEY_STORAGE_KEY,
           ]),
           sendMessage<SettingsResponse>({ type: 'GET_SETTINGS' }).catch(() => undefined),
           forcedTabId == null
@@ -1006,11 +980,8 @@ function App() {
           (typeof localStorageState?.[LEGACY_API_KEY_STORAGE_KEY] === 'string' &&
             localStorageState[LEGACY_API_KEY_STORAGE_KEY].trim().length > 0);
         const storageHasGoogleFactCheckKey =
-          GOOGLE_FACT_CHECK_API_KEY_STORAGE_KEYS.some(
-            (key) =>
-              typeof localStorageState?.[key] === 'string' &&
-              localStorageState[key].trim().length > 0,
-          );
+          typeof localStorageState?.[GOOGLE_FACT_CHECK_API_KEY_STORAGE_KEY] === 'string' &&
+          localStorageState[GOOGLE_FACT_CHECK_API_KEY_STORAGE_KEY].trim().length > 0;
         setHasApiKey(storageHasKey || Boolean(settings?.hasApiKey));
         setHasGoogleFactCheckApiKey(
           storageHasGoogleFactCheckKey || Boolean(settings?.hasGoogleFactCheckApiKey),
@@ -1018,6 +989,13 @@ function App() {
 
         const currentTabId = forcedTabId ?? tabs[0]?.id ?? null;
         setActiveTabId(currentTabId);
+        const resolvedTabUrl =
+          typeof tabs[0]?.url === 'string'
+            ? tabs[0].url
+            : currentTabId != null
+              ? await ext.tabs.get(currentTabId).then((tab) => tab?.url ?? null).catch(() => null)
+              : null;
+        setActiveTabUrl(resolvedTabUrl);
         if (currentTabId != null) {
           await loadStatusAndReport(currentTabId);
           const focusResponse = await getFocusFindingWithRetry(currentTabId).catch(
@@ -1110,11 +1088,14 @@ function App() {
 
   useEffect(() => {
     if (!focusedFindingId || !report) return;
+    if (appliedFocusFindingId === focusedFindingId) return;
     const found = report.findings.some((finding) => finding.id === focusedFindingId);
     if (!found) return;
 
     setFilter('all');
+    setActiveFindingId(focusedFindingId);
     setExpandedId(focusedFindingId);
+    setAppliedFocusFindingId(focusedFindingId);
 
     const timer = setTimeout(() => {
       const selector = `[data-finding-id="${CSS.escape(focusedFindingId)}"]`;
@@ -1123,7 +1104,12 @@ function App() {
     }, 120);
 
     return () => clearTimeout(timer);
-  }, [focusedFindingId, report]);
+  }, [appliedFocusFindingId, focusedFindingId, report]);
+
+  useEffect(() => {
+    if (!expandedId) return;
+    void loadFindingEvidence(expandedId);
+  }, [expandedId, loadFindingEvidence]);
 
   /* ---- actions ---- */
 
@@ -1172,6 +1158,7 @@ function App() {
         tabId: activeTabId,
         findingId,
       });
+      window.close();
     },
     [activeTabId],
   );
@@ -1184,43 +1171,82 @@ function App() {
     return sortFindingsForDisplay(filtered, report?.scanKind === 'youtube_video');
   }, [report?.findings, report?.scanKind, filter]);
 
-  const dashboardPayload = useMemo(
-    () => buildDashboardPayload(report, scanStatus),
-    [report, scanStatus],
-  );
-  const dashboardSummary = dashboardPayload.summary;
-  const dashboardUpdatedLabel = formatDashboardTimestamp(dashboardPayload.generatedAt);
-  const confidencePct = Math.round(dashboardSummary.averageConfidence * 100);
-  const severityPct = Math.round((dashboardSummary.averageSeverity / 5) * 100);
-  const issueBreakdown = useMemo(
-    () => [
-      { key: 'misinformation', label: 'Misinformation', count: dashboardSummary.misinformationCount },
-      { key: 'fallacy', label: 'Fallacies', count: dashboardSummary.fallacyCount },
-      { key: 'bias', label: 'Bias Signals', count: dashboardSummary.biasCount },
-    ],
-    [dashboardSummary.biasCount, dashboardSummary.fallacyCount, dashboardSummary.misinformationCount],
-  );
-  const issueDenominator = Math.max(1, dashboardSummary.totalFindings);
-
   const isRunning = runningStates.has(scanStatus.state);
   const totalFindings = report?.summary.totalFindings ?? 0;
   const stepInfo = getStepInfo(scanStatus.state);
+  const isYoutubeMode =
+    report?.scanKind === 'youtube_video' ||
+    isYouTubeTabUrl(report?.url ?? activeTabUrl);
+  const webViewMode: 'initial' | 'scanning' | 'scanned' = isRunning
+    ? 'scanning'
+    : report
+      ? 'scanned'
+      : 'initial';
+
+  const webStepIndex = scanStatus.state === 'analyzing'
+    ? 1
+    : scanStatus.state === 'highlighting'
+      ? 2
+      : 0;
+  const webStepCurrent = Math.min(webStepIndex + 1, 3);
+  const webScanSteps = [
+    {
+      label: 'DOM content capture',
+      state: webStepIndex > 0 ? 'done' : 'running',
+    },
+    {
+      label: 'Misinformation confidence scoring',
+      state: webStepIndex > 1 ? 'done' : webStepIndex === 1 ? 'running' : 'queued',
+    },
+    {
+      label: 'Correction draft generation',
+      state: webStepIndex === 2 ? 'running' : 'queued',
+    },
+  ] as const;
+
+  const activeFinding = filteredFindings.find((finding) => finding.id === activeFindingId) ?? null;
+
+  useEffect(() => {
+    if (filteredFindings.length === 0) {
+      setActiveFindingId(null);
+      return;
+    }
+
+    if (
+      activeFindingId == null &&
+      focusedFindingId &&
+      filteredFindings.some((finding) => finding.id === focusedFindingId)
+    ) {
+      setActiveFindingId((prev) => (prev === focusedFindingId ? prev : focusedFindingId));
+      return;
+    }
+
+    const hasSelected =
+      activeFindingId != null && filteredFindings.some((finding) => finding.id === activeFindingId);
+    if (!hasSelected) {
+      setActiveFindingId(filteredFindings[0].id);
+    }
+  }, [activeFindingId, filteredFindings, focusedFindingId]);
+
+  useEffect(() => {
+    if (webViewMode !== 'scanned' || !activeFindingId) return;
+    void loadFindingEvidence(activeFindingId);
+  }, [activeFindingId, loadFindingEvidence, webViewMode]);
 
   /* ---- render ---- */
 
   return (
-    <div className="popup-shell">
+    <div className="popup-shell popup-shell--web">
       <div className="paper-grain" aria-hidden />
 
       {/* ---- Header ---- */}
       <header className="popup-header">
         <div className="flex items-center gap-2.5">
           <div className="header-mark" aria-hidden>
-            <Radar className="size-[13px]" />
+            <img src="/clarity-logo.svg" alt="" className="header-logo" />
           </div>
           <div>
-            <p className="eyebrow">Signal Desk</p>
-            <h1 className="headline">Credibility Review</h1>
+            <h1 className="headline">Clarity</h1>
           </div>
         </div>
         <SettingsModal
@@ -1233,130 +1259,100 @@ function App() {
         />
       </header>
 
-      <nav className="popup-view-tabs" aria-label="Popup sections">
-        <button
-          type="button"
-          className={`popup-view-tab ${popupView === 'review' ? 'is-active' : ''}`}
-          onClick={() => setPopupView('review')}
-          aria-selected={popupView === 'review'}
-        >
-          Review
-        </button>
-        <button
-          type="button"
-          className={`popup-view-tab ${popupView === 'dashboard' ? 'is-active' : ''}`}
-          onClick={() => setPopupView('dashboard')}
-          aria-selected={popupView === 'dashboard'}
-        >
-          Dashboard
-        </button>
-      </nav>
-
-      {popupView === 'review' ? (
-        <>
-          {/* ---- Scan section ---- */}
-          <section className="scan-section">
-            <div className="flex items-center gap-3">
-              <div className="relative flex items-center justify-center text-primary">
-                {isRunning ? (
-                  <StepProgressRing
-                    current={stepInfo?.current ?? 1}
-                    total={stepInfo?.total ?? 3}
-                    size={36}
-                  />
-                ) : (
-                  <div className="flex size-9 items-center justify-center rounded-full border border-border/60 bg-background/60">
-                    {scanStatus.state === 'done' ? (
-                      <ShieldCheck className="size-4 text-emerald-600" />
-                    ) : scanStatus.state === 'error' ? (
-                      <Gauge className="size-4 text-destructive" />
-                    ) : (
-                      <Search className="size-4 text-muted-foreground" />
-                    )}
-                  </div>
-                )}
-              </div>
-              <div className="flex-1">
-                <div className="flex items-center gap-2">
-                  <span className="scan-state-label">{stateLabel(scanStatus.state)}</span>
-                </div>
-                {stepInfo && (
-                  <p data-testid="scan-status" className="text-[11px] text-muted-foreground">
-                    {`Step ${stepInfo.current} of ${stepInfo.total}: ${stepInfo.label}`}
-                  </p>
-                )}
-                <p className="scan-message">{scanStatus.message}</p>
-              </div>
+      {webViewMode === 'initial' ? (
+        <section className="screen14">
+          <div className="screen14-card">
+            <div>
+              <p className="screen14-title">Scan</p>
+              <p className="screen14-sub">
+                {scanStatus.state === 'error'
+                  ? scanStatus.message
+                  : 'Start a scan for the active tab to detect misleading claims and bias.'}
+              </p>
             </div>
-
-            <div className="scan-actions-grid">
-              <Button
-                data-testid="start-scan"
-                onClick={() => void startScan()}
-                disabled={isRunning || activeTabId == null || !hasApiKey}
-                className="mt-3 w-full"
-                size="sm"
-              >
-                {isRunning ? (
-                  <>
-                    <LoaderCircle className="size-3.5 animate-spin" />
-                    Scanning...
-                  </>
-                ) : (
-                  <>
-                    <Search className="size-3.5" />
-                    Scan Active Tab
-                  </>
-                )}
-              </Button>
-            </div>
-
+            <Button
+              data-testid="start-scan"
+              onClick={() => void startScan()}
+              disabled={activeTabId == null || !hasApiKey}
+              className="screen14-action"
+              size="sm"
+            >
+              <Search className="size-3.5" />
+              Scan Tab
+            </Button>
             {!hasApiKey && (
-              <p className="mt-2 text-center text-[11px] text-muted-foreground">
+              <p className="screen14-note">
                 Open <Settings className="inline size-3 -translate-y-px" /> settings to add your OpenRouter API key.
               </p>
             )}
-          </section>
-
-          {/* ---- Findings ---- */}
-          <section className="findings-section">
-            {/* Summary counters */}
-            <div className="findings-bar">
-              <span className="findings-bar-label">
-                {totalFindings} {totalFindings === 1 ? 'finding' : 'findings'}
-              </span>
-              <div className="flex gap-1.5">
-                <span className="counter counter--red">
-                  {report?.summary.misinformationCount ?? 0}
-                </span>
-                <span className="counter counter--amber">
-                  {report?.summary.fallacyCount ?? 0}
-                </span>
-                <span className="counter counter--sky">
-                  {report?.summary.biasCount ?? 0}
-                </span>
+          </div>
+        </section>
+      ) : webViewMode === 'scanning' ? (
+        <section className="screen13">
+          <div className="screen13-card">
+            <div className="screen13-top">
+              <div>
+                <p className="screen13-status">Website analysis</p>
+                <h2 className="screen13-headline">Scanning claims and building findings...</h2>
               </div>
+              <span className="screen13-ring" aria-hidden />
             </div>
 
-            {/* Filter chips */}
-            <div className="mb-2.5 flex gap-1">
-              {(['all', 'misinformation', 'fallacy', 'bias'] as FilterKey[]).map((opt) => (
-                <button
-                  key={opt}
-                  onClick={() => setFilter(opt)}
-                  className={`filter-chip ${filter === opt ? 'filter-chip--active' : ''}`}
-                >
-                  {opt === 'all' ? 'All' : labelForType(opt)}
-                </button>
+            <div className="screen13-meter-row">
+              <span>Progress</span>
+              <span data-testid="scan-status">{`Step ${webStepCurrent} / 3`}</span>
+            </div>
+            <div className="screen13-track">
+              <div className="screen13-fill" style={{ width: `${(webStepCurrent / 3) * 100}%` }} />
+            </div>
+
+            <div className="screen13-steps">
+              {webScanSteps.map((step) => (
+                <div key={step.label} className={`screen13-step screen13-step--${step.state}`}>
+                  <p className="screen13-step-label">
+                    <span className={`screen13-step-dot screen13-step-dot--${step.state}`} />
+                    {step.label}
+                  </p>
+                  <span className="screen13-step-state">{step.state}</span>
+                </div>
               ))}
             </div>
 
-            {/* Findings list */}
-            <div className="findings-list">
+            <p className="screen13-message">{scanStatus.message}</p>
+          </div>
+        </section>
+      ) : (
+        <section className="screen6">
+          <div className="screen6-filter-row">
+            {(['all', 'misinformation', 'fallacy', 'bias'] as FilterKey[]).map((opt) => {
+              const count = opt === 'all'
+                ? totalFindings
+                : opt === 'misinformation'
+                  ? (report?.summary.misinformationCount ?? 0)
+                  : opt === 'fallacy'
+                    ? (report?.summary.fallacyCount ?? 0)
+                    : (report?.summary.biasCount ?? 0);
+
+              return (
+                <button
+                  key={opt}
+                  type="button"
+                  onClick={() => {
+                    setFilter(opt);
+                  }}
+                  className={`screen6-filter-tab ${filter === opt ? 'screen6-filter-tab--active' : ''}`}
+                >
+                  {opt === 'all' ? 'All' : labelForType(opt)}
+                  <strong>{count}</strong>
+                </button>
+              );
+            })}
+          </div>
+
+          <div className="screen6-body">
+            <aside className="screen6-list">
               {!report ? (
-                <div className="empty-state">
-                  Run a scan to review the active page for credibility issues.
-                </div>
+                <div className="empty-state">Run a scan to review this tab.</div>
               ) : report.findings.length === 0 ? (
                 <div className="empty-state empty-state--ok">
                   <ShieldCheck className="size-4 shrink-0" />
@@ -1366,117 +1362,47 @@ function App() {
                 <div className="empty-state">No findings for this filter.</div>
               ) : (
                 filteredFindings.map((finding) => (
-                  <FindingCard
+                  <button
                     key={finding.id}
-                    finding={finding}
-                    isExpanded={expandedId === finding.id}
-                    isFocused={focusedFindingId === finding.id}
-                    evidenceState={evidenceByFinding[finding.id] ?? { status: 'idle' }}
-                    onToggle={() =>
-                      setExpandedId((prev) => (prev === finding.id ? null : finding.id))
-                    }
-                    onJump={() => void jumpToFinding(finding.id)}
-                    onLoadEvidence={() => void loadFindingEvidence(finding.id)}
-                    onRetryEvidence={() => void loadFindingEvidence(finding.id, true)}
-                  />
+                    type="button"
+                    className={`screen6-list-item ${activeFinding?.id === finding.id ? 'screen6-list-item--active' : ''}`}
+                    onClick={() => {
+                      setActiveFindingId(finding.id);
+                    }}
+                  >
+                    <div className="screen6-list-item-head">
+                      <div className="mt-0.5 flex shrink-0 flex-wrap gap-1">
+                        {finding.issueTypes.map((issue) => (
+                          <span
+                            key={`${finding.id}-${issue}`}
+                            className={`issue-badge ${issueColor(issue)}`}
+                          >
+                            {labelForType(issue)}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                    <p className="screen6-list-item-quote">{formatQuoteForDisplay(finding.quote)}</p>
+                  </button>
                 ))
               )}
+            </aside>
+
+            <div className="screen6-detail">
+              {activeFinding ? (
+                <SplitFindingDetail
+                  key={activeFinding.id}
+                  finding={activeFinding}
+                  isFocused={focusedFindingId === activeFinding.id}
+                  evidenceState={evidenceByFinding[activeFinding.id] ?? { status: 'idle' }}
+                  onJump={() => void jumpToFinding(activeFinding.id)}
+                  onLoadEvidence={() => void loadFindingEvidence(activeFinding.id)}
+                  onRetryEvidence={() => void loadFindingEvidence(activeFinding.id, true)}
+                />
+              ) : (
+                <div className="empty-state">Select a finding to inspect details.</div>
+              )}
             </div>
-          </section>
-        </>
-      ) : (
-        <section className="mini-dashboard-section">
-          <div className="mini-dashboard-head">
-            <p className="mini-dashboard-title">{dashboardPayload.source.title}</p>
-            <p className="mini-dashboard-meta">{dashboardUpdatedLabel}</p>
-            {dashboardPayload.source.url && (
-              <p className="mini-dashboard-url">{dashboardPayload.source.url}</p>
-            )}
-          </div>
-
-          <div className="mini-kpi-grid">
-            <article className="mini-kpi-card">
-              <p className="mini-kpi-label">Total</p>
-              <p className="mini-kpi-value">{dashboardSummary.totalFindings}</p>
-            </article>
-            <article className="mini-kpi-card">
-              <p className="mini-kpi-label">Misinfo</p>
-              <p className="mini-kpi-value mini-kpi-value--red">{dashboardSummary.misinformationCount}</p>
-            </article>
-            <article className="mini-kpi-card">
-              <p className="mini-kpi-label">Fallacies</p>
-              <p className="mini-kpi-value mini-kpi-value--amber">{dashboardSummary.fallacyCount}</p>
-            </article>
-            <article className="mini-kpi-card">
-              <p className="mini-kpi-label">Bias</p>
-              <p className="mini-kpi-value mini-kpi-value--blue">{dashboardSummary.biasCount}</p>
-            </article>
-          </div>
-
-          <div className="mini-quality-grid">
-            <div>
-              <div className="mini-quality-row">
-                <span>Confidence</span>
-                <span>{confidencePct}%</span>
-              </div>
-              <div className="mini-meter-track">
-                <div className="mini-meter-fill mini-meter-fill--blue" style={{ width: `${confidencePct}%` }} />
-              </div>
-            </div>
-            <div>
-              <div className="mini-quality-row">
-                <span>Severity</span>
-                <span>{dashboardSummary.averageSeverity.toFixed(1)}/5</span>
-              </div>
-              <div className="mini-meter-track">
-                <div className="mini-meter-fill mini-meter-fill--amber" style={{ width: `${severityPct}%` }} />
-              </div>
-            </div>
-          </div>
-
-          <div className="mini-issue-list">
-            {issueBreakdown.map((row) => {
-              const pct = Math.round((row.count / issueDenominator) * 100);
-              return (
-                <div key={row.key}>
-                  <div className="mini-quality-row">
-                    <span>{row.label}</span>
-                    <span>{row.count}</span>
-                  </div>
-                  <div className="mini-meter-track">
-                    <div className="mini-meter-fill mini-meter-fill--neutral" style={{ width: `${pct}%` }} />
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-
-          <div className="mini-flagged-head">Flagged Snippets</div>
-          <div className="mini-flagged-list">
-            {dashboardPayload.findings.length === 0 ? (
-              <div className="empty-state empty-state--ok">
-                <ShieldCheck className="size-4 shrink-0" />
-                No high-confidence issues found.
-              </div>
-            ) : (
-              dashboardPayload.findings.slice(0, 8).map((finding, index) => (
-                <article key={`${finding.quote}-${index}`} className="mini-flagged-item">
-                  <p className="mini-flagged-quote">{finding.quote}</p>
-                  <div className="mini-flagged-meta">
-                    <div className="mini-tag-row">
-                      {finding.issueTypes.map((issue) => (
-                        <span key={`${finding.quote}-${issue}`} className={`mini-tag mini-tag--${issue}`}>
-                          {labelForType(issue)}
-                        </span>
-                      ))}
-                    </div>
-                    <span>{Math.round(finding.confidence * 100)}%</span>
-                    <span>{finding.severity}/5</span>
-                  </div>
-                  <p className="mini-flagged-rationale">{finding.rationale}</p>
-                </article>
-              ))
-            )}
           </div>
         </section>
       )}

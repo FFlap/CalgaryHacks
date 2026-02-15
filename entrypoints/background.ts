@@ -378,6 +378,16 @@ function scrollToHighlightInPage(findingId: string) {
   return true;
 }
 
+function seekVideoToTimestampInPage(timestampSec: number) {
+  if (!Number.isFinite(timestampSec) || timestampSec < 0) return false;
+  const video = document.querySelector<HTMLVideoElement>('video');
+  if (!video) return false;
+
+  video.currentTime = Math.max(0, timestampSec);
+  video.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  return true;
+}
+
 function extractVisibleTextInPage(): ExtractionResult {
   const blockedTags = new Set([
     'SCRIPT',
@@ -1152,6 +1162,23 @@ export default defineBackground(() => {
         }
 
         case 'JUMP_TO_FINDING': {
+          const report = await getReportForTab(message.tabId);
+          const finding = report?.findings.find((item) => item.id === message.findingId);
+          const canSeekVideo =
+            report?.scanKind === 'youtube_video' &&
+            typeof finding?.timestampSec === 'number' &&
+            Number.isFinite(finding.timestampSec);
+
+          if (canSeekVideo) {
+            const jumped = await executeOnTab<boolean>(
+              message.tabId,
+              seekVideoToTimestampInPage,
+              [finding.timestampSec as number],
+            );
+            sendResponse({ ok: jumped });
+            return;
+          }
+
           const found = await executeOnTab<boolean>(
             message.tabId,
             scrollToHighlightInPage,
