@@ -1,6 +1,24 @@
 import { analyzeClaims } from '@/lib/analysis';
-import { getApiKey, getReport, hasApiKey, saveApiKey, saveReport } from '@/lib/storage';
-import type { ExtractionResult, Finding, RuntimeRequest, ScanReport, ScanState, ScanStatus } from '@/lib/types';
+import {
+  clearFindingEvidenceForTab,
+  getApiKey,
+  getFindingEvidence,
+  getReport,
+  hasApiKey,
+  saveApiKey,
+  saveFindingEvidence,
+  saveReport,
+} from '@/lib/storage';
+import { buildFindingEvidence } from '@/lib/verification';
+import type {
+  ExtractionResult,
+  Finding,
+  FindingEvidence,
+  RuntimeRequest,
+  ScanReport,
+  ScanState,
+  ScanStatus,
+} from '@/lib/types';
 
 const MAX_ANALYSIS_CHARS = 60_000;
 
@@ -10,6 +28,7 @@ const statusByTab = new Map<number, ScanStatus>();
 const reportByTab = new Map<number, ScanReport>();
 const focusedFindingByTab = new Map<number, string>();
 const inFlightScans = new Map<number, Promise<void>>();
+const inFlightEvidence = new Map<string, Promise<FindingEvidence>>();
 
 function setStatus(tabId: number, state: ScanState, message: string, progress: number, errorCode?: string) {
   statusByTab.set(tabId, {
@@ -264,6 +283,7 @@ async function runScan(tabId: number): Promise<void> {
   }
 
   try {
+    await clearFindingEvidenceForTab(tabId);
     setStatus(tabId, 'extracting', 'Collecting visible text from the page...', 0.15);
 
     const extraction = await executeOnTab<ExtractionResult>(tabId, extractVisibleTextInPage);
@@ -301,6 +321,7 @@ async function runScan(tabId: number): Promise<void> {
 
     reportByTab.set(tabId, report);
     await saveReport(tabId, report);
+    await clearFindingEvidenceForTab(tabId);
 
     const suffix = report.summary.totalFindings === 0 ? 'No high-confidence issues found.' : `${report.summary.totalFindings} high-confidence findings.`;
     setStatus(tabId, 'done', suffix, 1);
@@ -332,6 +353,105 @@ async function resolveStatusTabId(preferred?: number): Promise<number | undefine
   }
 }
 
+function evidenceJobKey(tabId: number, findingId: string): string {
+  return `${tabId}:${findingId}`;
+}
+
+const EVIDENCE_CACHE_MAX_AGE_MS = 10 * 60 * 1000;
+
+function shouldSuppressGdeltError(message: string): boolean {
+  const normalized = message.toLowerCase();
+  return (
+    normalized.includes('gdelt api failed (429)') ||
+    normalized.includes('gdelt api returned invalid json')
+  );
+}
+
+async function sanitizeCachedEvidence(
+  tabId: number,
+  findingId: string,
+  evidence: FindingEvidence,
+): Promise<FindingEvidence> {
+  const gdeltError = evidence.errors.gdelt;
+  if (!gdeltError || !shouldSuppressGdeltError(gdeltError)) {
+    return evidence;
+  }
+
+  const sanitized: FindingEvidence = {
+    ...evidence,
+    errors: {
+      ...evidence.errors,
+      gdelt: undefined,
+    },
+  };
+  await saveFindingEvidence(tabId, findingId, sanitized);
+  return sanitized;
+}
+
+function isEvidenceStale(evidence: FindingEvidence): boolean {
+  const generatedAt = Date.parse(evidence.generatedAt);
+  if (!Number.isFinite(generatedAt)) {
+    return true;
+  }
+  return Date.now() - generatedAt > EVIDENCE_CACHE_MAX_AGE_MS;
+}
+
+async function getReportForTab(tabId: number): Promise<ScanReport | null> {
+  return reportByTab.get(tabId) ?? (await getReport(tabId));
+}
+
+async function resolveFindingEvidence(options: {
+  tabId: number;
+  findingId: string;
+  forceRefresh?: boolean;
+}): Promise<FindingEvidence> {
+  const { tabId, findingId, forceRefresh = false } = options;
+  const report = await getReportForTab(tabId);
+
+  if (!report) {
+    throw new Error('Scan report is unavailable for this tab. Run a scan first.');
+  }
+
+  const finding = report.findings.find((item) => item.id === findingId);
+  if (!finding) {
+    throw new Error('Finding not found in the current scan report.');
+  }
+
+  if (!forceRefresh) {
+    const cached = await getFindingEvidence(tabId, findingId);
+    if (cached) {
+      if (!isEvidenceStale(cached)) {
+        return sanitizeCachedEvidence(tabId, findingId, cached);
+      }
+    }
+  }
+
+  const key = evidenceJobKey(tabId, findingId);
+  const existingJob = inFlightEvidence.get(key);
+  if (existingJob) {
+    return existingJob;
+  }
+
+  const job = buildFindingEvidence({
+    tabId,
+    finding: {
+      id: finding.id,
+      quote: finding.quote,
+      correction: finding.correction,
+    },
+  })
+    .then(async (evidence) => {
+      await saveFindingEvidence(tabId, findingId, evidence);
+      return evidence;
+    })
+    .finally(() => {
+      inFlightEvidence.delete(key);
+    });
+
+  inFlightEvidence.set(key, job);
+  return job;
+}
+
 export default defineBackground(() => {
   ext.runtime.onMessage.addListener((message: RuntimeRequest, sender, sendResponse) => {
     void (async () => {
@@ -351,8 +471,9 @@ export default defineBackground(() => {
           return;
         }
 
-      case 'START_SCAN': {
+        case 'START_SCAN': {
           const tabId = await resolveScannableTabId(message.tabId);
+          await clearFindingEvidenceForTab(tabId);
           setStatus(tabId, 'extracting', 'Preparing scan...', 0.05);
           void startScan(tabId);
           sendResponse({ ok: true, tabId });
@@ -377,6 +498,16 @@ export default defineBackground(() => {
         case 'GET_REPORT': {
           const report = reportByTab.get(message.tabId) ?? (await getReport(message.tabId));
           sendResponse({ report: report ?? null });
+          return;
+        }
+
+        case 'GET_FINDING_EVIDENCE': {
+          const evidence = await resolveFindingEvidence({
+            tabId: message.tabId,
+            findingId: message.findingId,
+            forceRefresh: message.forceRefresh,
+          });
+          sendResponse({ ok: true, evidence });
           return;
         }
 
