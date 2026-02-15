@@ -14,7 +14,32 @@ export default defineConfig({
     keepProfileChanges: true,
   },
   manifest: () => {
+    const brandingManifest = {
+      name: 'Clarity',
+      short_name: 'Clarity',
+      description: 'Detect misinformation, fallacies, and bias in web pages and YouTube videos.',
+      icons: {
+        16: 'icon/16.png',
+        32: 'icon/32.png',
+        48: 'icon/48.png',
+        96: 'icon/96.png',
+        128: 'icon/128.png',
+      },
+      action: {
+        default_title: 'Clarity',
+        default_popup: 'popup.html',
+        default_icon: {
+          16: 'icon/16.png',
+          32: 'icon/32.png',
+          48: 'icon/48.png',
+          96: 'icon/96.png',
+          128: 'icon/128.png',
+        },
+      },
+    };
+
     const productionManifest = {
+      ...brandingManifest,
       permissions: ['activeTab', 'scripting', 'storage', 'tabs'],
       host_permissions: [
         'https://openrouter.ai/*',
@@ -35,6 +60,7 @@ export default defineConfig({
     }
 
     return {
+      ...brandingManifest,
       permissions: ['scripting', 'tabs', 'storage'],
       host_permissions: [
         'http://*/*',
