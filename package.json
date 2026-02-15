@@ -15,6 +15,7 @@
     "zip:firefox": "wxt zip -b firefox",
     "compile": "tsc --noEmit",
     "test:e2e": "npm run build:e2e-ext && playwright test",
+    "test:e2e:focus": "npm run build:e2e-ext && playwright test tests/e2e/highlight-focus.spec.ts",
     "test:e2e:foxnews": "npm run build:e2e-ext && playwright test tests/e2e/foxnews.spec.ts",
     "playwright:install": "playwright install chromium",
     "postinstall": "wxt prepare"

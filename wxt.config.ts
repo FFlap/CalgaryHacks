@@ -16,7 +16,7 @@ export default defineConfig({
   manifest: () => {
     const productionManifest = {
       permissions: ['activeTab', 'scripting', 'storage', 'tabs'],
-      host_permissions: ['https://generativelanguage.googleapis.com/*'],
+      host_permissions: ['https://openrouter.ai/*'],
     };
 
     if (!isE2E) {
@@ -28,7 +28,7 @@ export default defineConfig({
       host_permissions: [
         'http://*/*',
         'https://*/*',
-        'https://generativelanguage.googleapis.com/*',
+        'https://openrouter.ai/*',
       ],
     };
   },

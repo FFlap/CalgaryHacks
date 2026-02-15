@@ -12,17 +12,17 @@ import {
   launchExtensionContext,
   openPopupPage,
   sendRuntimeMessageWithRetry,
-  startScan,
   waitForScanCompletion,
 } from './extension-fixture';
 
 const ARTIFACT_DIR = path.resolve(process.cwd(), 'test-results/foxnews');
 
-test('Fox News page scan (live Gemini grounding, structural assertions)', async () => {
+test('Fox News page scan (live OpenRouter, structural assertions)', async () => {
   test.setTimeout(300_000);
+  const apiKey = process.env.OPENROUTER_API_KEY ?? process.env.GEMINI_API_KEY;
   expect(
-    process.env.GEMINI_API_KEY,
-    'Missing GEMINI_API_KEY. Export a valid key before running this live E2E test.',
+    apiKey,
+    'Missing OPENROUTER_API_KEY (GEMINI_API_KEY fallback is also accepted). Export a valid key before running this live E2E test.',
   ).toBeTruthy();
 
   await fs.mkdir(ARTIFACT_DIR, { recursive: true });
@@ -45,7 +45,7 @@ test('Fox News page scan (live Gemini grounding, structural assertions)', async 
     await articlePage.bringToFront();
 
     popupPage = await openPopupPage(context, extensionId);
-    await ensureApiKey(popupPage, process.env.GEMINI_API_KEY!);
+    await ensureApiKey(popupPage, apiKey!);
     await expect(
       popupPage.getByText('Background is waking up. Try again in a moment.'),
     ).toHaveCount(0);
@@ -53,13 +53,12 @@ test('Fox News page scan (live Gemini grounding, structural assertions)', async 
     const startResponse = await sendRuntimeMessageWithRetry<
       { type: 'START_SCAN'; tabId?: number },
       Record<string, unknown>
-    >(popupPage, { type: 'START_SCAN' }).catch(async () => startScan(popupPage!));
-    const startTabId =
-      startResponse && typeof startResponse.tabId === 'number'
-        ? startResponse.tabId
-        : undefined;
+    >(popupPage, { type: 'START_SCAN' });
 
-    const status = await waitForScanCompletion(popupPage, startTabId, 240_000);
+    const startTabId = typeof startResponse.tabId === 'number' ? startResponse.tabId : null;
+    expect(startTabId, 'START_SCAN must return a concrete tabId').not.toBeNull();
+
+    const status = await waitForScanCompletion(popupPage, startTabId!, 240_000);
     const statusState = String((status.state ?? status.status ?? '')).toLowerCase();
     expect(['done', 'completed']).toContain(statusState);
 

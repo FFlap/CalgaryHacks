@@ -1,4 +1,4 @@
-import { callGeminiJson } from '@/lib/gemini';
+import { callOpenRouterJson } from '@/lib/openrouter';
 import type {
   CandidateClaim,
   Citation,
@@ -11,7 +11,6 @@ import type {
 
 const MISINFORMATION_THRESHOLD = 0.88;
 const ARGUMENT_THRESHOLD = 0.82;
-const MIN_CITATIONS = 2;
 
 const FALLACY_SUBTYPES = new Set([
   'straw man',
@@ -68,10 +67,7 @@ function toConfidence(value: unknown): number {
   return Math.max(0, Math.min(1, asNumber));
 }
 
-function sanitizeCitations(
-  value: unknown,
-  fallbackCitations: Citation[],
-): Citation[] {
+function sanitizeCitations(value: unknown): Citation[] {
   const citations: Citation[] = [];
   const seen = new Set<string>();
 
@@ -107,13 +103,6 @@ function sanitizeCitations(
     }
   }
 
-  for (const citation of fallbackCitations) {
-    if (citations.length >= MIN_CITATIONS) {
-      break;
-    }
-    pushCitation(citation.title, citation.url);
-  }
-
   return citations;
 }
 
@@ -145,7 +134,7 @@ function buildVerificationPrompt(
   return [
     'You are a high-precision credibility analyst.',
     'Evaluate each quote for misinformation, logical fallacy, and rhetorical bias.',
-    'For misinformation: use web grounding and include only if highly likely false or misleading.',
+    'For misinformation: include only if highly likely false or misleading.',
     'For fallacy and bias: use quote-grounded reasoning only.',
     'Approved fallacy subtypes: straw man, ad hominem, false dilemma, hasty generalization, slippery slope, appeal to fear.',
     'Approved bias subtypes: loaded language, cherry picking, framing bias, confirmation framed rhetoric.',
@@ -153,7 +142,7 @@ function buildVerificationPrompt(
     '{"findings":[{"quote":"string","issueTypes":["misinformation"|"fallacy"|"bias"],"subtype":"string optional","confidence":0.0,"severity":1,"rationale":"string","correction":"string optional","citations":[{"title":"string","url":"https://..."}]}]}',
     'Rules:',
     '- Output only high-confidence items.',
-    '- For misinformation include correction and at least two quality sources when possible.',
+    '- For misinformation include correction and citations only when the source is clear and reliable.',
     '- If a quote is not supportable as problematic, omit it.',
     `URL: ${url}`,
     `TITLE: ${title}`,
@@ -197,7 +186,7 @@ function coerceCandidates(payload: unknown): CandidateClaim[] {
   return candidates;
 }
 
-function coerceRawFindings(payload: unknown, fallbackCitations: Citation[]): RawFinding[] {
+function coerceRawFindings(payload: unknown): RawFinding[] {
   if (!payload || typeof payload !== 'object') {
     return [];
   }
@@ -225,7 +214,7 @@ function coerceRawFindings(payload: unknown, fallbackCitations: Citation[]): Raw
       severity: toSeverity((item as { severity?: unknown }).severity),
       rationale: String((item as { rationale?: unknown }).rationale ?? '').trim(),
       correction: String((item as { correction?: unknown }).correction ?? '').trim() || undefined,
-      citations: sanitizeCitations((item as { citations?: unknown }).citations, fallbackCitations),
+      citations: sanitizeCitations((item as { citations?: unknown }).citations),
     });
   }
   return normalized;
@@ -246,9 +235,6 @@ function meetsPrecisionRules(rawFinding: RawFinding, normalizedPageText: string)
       return false;
     }
     if (!rawFinding.correction || rawFinding.correction.length < 12) {
-      return false;
-    }
-    if ((rawFinding.citations ?? []).length < MIN_CITATIONS) {
       return false;
     }
   }
@@ -356,11 +342,11 @@ export async function analyzeClaims(options: {
   const normalizedPageText = normalizeText(text);
 
   const candidatePrompt = buildCandidatePrompt(url, title, text);
-  const candidateResponse = await callGeminiJson<{ candidates?: unknown }>({
+  const candidateResponse = await callOpenRouterJson<{ candidates?: unknown }>({
     apiKey,
     prompt: candidatePrompt,
   });
-  const candidates = coerceCandidates(candidateResponse.data);
+  const candidates = coerceCandidates(candidateResponse);
 
   if (candidates.length === 0) {
     return {
@@ -376,13 +362,12 @@ export async function analyzeClaims(options: {
   }
 
   const verificationPrompt = buildVerificationPrompt(url, title, candidates);
-  const verificationResponse = await callGeminiJson<{ findings?: unknown }>({
+  const verificationResponse = await callOpenRouterJson<{ findings?: unknown }>({
     apiKey,
     prompt: verificationPrompt,
-    withGrounding: true,
   });
 
-  const rawFindings = coerceRawFindings(verificationResponse.data, verificationResponse.groundingCitations);
+  const rawFindings = coerceRawFindings(verificationResponse);
   const filtered = rawFindings.filter((finding) => meetsPrecisionRules(finding, normalizedPageText));
   const findings = mergeFindings(filtered);
 

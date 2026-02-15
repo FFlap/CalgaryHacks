@@ -259,7 +259,7 @@ async function executeOnTab<T>(
 async function runScan(tabId: number): Promise<void> {
   const apiKey = await getApiKey();
   if (!apiKey) {
-    setStatus(tabId, 'error', 'Gemini API key is required.', 1, 'missing_api_key');
+    setStatus(tabId, 'error', 'OpenRouter API key is required.', 1, 'missing_api_key');
     return;
   }
 
@@ -274,7 +274,7 @@ async function runScan(tabId: number): Promise<void> {
     const truncatedText = extraction.text.slice(0, MAX_ANALYSIS_CHARS);
     const truncated = extraction.text.length > MAX_ANALYSIS_CHARS;
 
-    setStatus(tabId, 'analyzing', 'Analyzing claims with Gemini 2.5 Flash…', 0.55);
+    setStatus(tabId, 'analyzing', 'Analyzing claims with OpenRouter Trinity…', 0.55);
     const report = await analyzeClaims({
       apiKey,
       tabId,

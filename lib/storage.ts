@@ -1,17 +1,21 @@
 import type { ScanReport } from '@/lib/types';
 
-const API_KEY_STORAGE_KEY = 'gemini_api_key';
+const API_KEY_STORAGE_KEY = 'openrouter_api_key';
+const LEGACY_API_KEY_STORAGE_KEY = 'gemini_api_key';
 const REPORT_PREFIX = 'scan_report_';
 
 const ext = ((globalThis as any).browser ?? (globalThis as any).chrome) as typeof browser;
 
 export async function saveApiKey(apiKey: string): Promise<void> {
-  await ext.storage.local.set({ [API_KEY_STORAGE_KEY]: apiKey });
+  await ext.storage.local.set({
+    [API_KEY_STORAGE_KEY]: apiKey,
+    [LEGACY_API_KEY_STORAGE_KEY]: apiKey,
+  });
 }
 
 export async function getApiKey(): Promise<string | null> {
-  const stored = await ext.storage.local.get(API_KEY_STORAGE_KEY);
-  const value = stored[API_KEY_STORAGE_KEY];
+  const stored = await ext.storage.local.get([API_KEY_STORAGE_KEY, LEGACY_API_KEY_STORAGE_KEY]);
+  const value = stored[API_KEY_STORAGE_KEY] ?? stored[LEGACY_API_KEY_STORAGE_KEY];
   return typeof value === 'string' && value.trim().length > 0 ? value : null;
 }
 

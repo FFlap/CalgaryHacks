@@ -30,7 +30,8 @@ import type { Finding, IssueType, RuntimeRequest, ScanReport, ScanStatus } from 
 /* ------------------------------------------------------------------ */
 
 const ext = ((globalThis as any).browser ?? (globalThis as any).chrome) as typeof browser;
-const API_KEY_STORAGE_KEY = 'gemini_api_key';
+const API_KEY_STORAGE_KEY = 'openrouter_api_key';
+const LEGACY_API_KEY_STORAGE_KEY = 'gemini_api_key';
 
 type ReportResponse = { report: ScanReport | null };
 type SettingsResponse = { hasApiKey: boolean };
@@ -59,10 +60,6 @@ async function sendMessage<T>(message: RuntimeRequest): Promise<T> {
     return { hasApiKey: false } as T;
   }
 
-  if (message.type === 'GET_REPORT') {
-    return { report: null } as T;
-  }
-
   if (message.type === 'GET_SCAN_STATUS') {
     return {
       tabId: message.tabId,
@@ -77,6 +74,49 @@ async function sendMessage<T>(message: RuntimeRequest): Promise<T> {
     throw lastError;
   }
   throw new Error('Background service is temporarily unavailable.');
+}
+
+async function getReportWithRetry(tabId: number, attempts = 14): Promise<ReportResponse> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      const response = (await ext.runtime.sendMessage({
+        type: 'GET_REPORT',
+        tabId,
+      })) as ReportResponse | undefined;
+      if (typeof response !== 'undefined') return response;
+    } catch (error) {
+      lastError = error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 120 + attempt * 90));
+  }
+  if (lastError instanceof Error) {
+    throw lastError;
+  }
+  return { report: null };
+}
+
+async function getFocusFindingWithRetry(
+  tabId: number,
+  attempts = 10,
+): Promise<FocusResponse> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    try {
+      const response = (await ext.runtime.sendMessage({
+        type: 'GET_FOCUS_FINDING',
+        tabId,
+      })) as FocusResponse | undefined;
+      if (typeof response !== 'undefined') return response;
+    } catch (error) {
+      lastError = error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 120 + attempt * 80));
+  }
+  if (lastError instanceof Error) {
+    throw lastError;
+  }
+  return { findingId: null };
 }
 
 /* ------------------------------------------------------------------ */
@@ -129,7 +169,10 @@ function SettingsModal({
     setIsSaving(true);
     try {
       const trimmed = apiKey.trim();
-      await ext.storage.local.set({ [API_KEY_STORAGE_KEY]: trimmed });
+      await ext.storage.local.set({
+        [API_KEY_STORAGE_KEY]: trimmed,
+        [LEGACY_API_KEY_STORAGE_KEY]: trimmed,
+      });
       await sendMessage<{ ok: boolean; hasApiKey: boolean }>({
         type: 'SAVE_API_KEY',
         apiKey: trimmed,
@@ -158,7 +201,7 @@ function SettingsModal({
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <KeyRound className="size-4 text-muted-foreground" />
-            Gemini API Key
+            OpenRouter API Key
           </DialogTitle>
           <DialogDescription>
             Stored locally in your browser. Never leaves this device.
@@ -186,7 +229,7 @@ function SettingsModal({
             onKeyDown={(e) => {
               if (e.key === 'Enter') void save();
             }}
-            placeholder={hasApiKey ? 'Enter new key to replace…' : 'Paste your Gemini API key'}
+            placeholder={hasApiKey ? 'Enter new key to replace…' : 'Paste your OpenRouter API key'}
             className="font-mono text-xs"
           />
           <Button
@@ -402,7 +445,7 @@ function App() {
   const loadStatusAndReport = useCallback(async (tabId: number) => {
     const [status, reportResponse] = await Promise.all([
       sendMessage<ScanStatus>({ type: 'GET_SCAN_STATUS', tabId }),
-      sendMessage<ReportResponse>({ type: 'GET_REPORT', tabId }),
+      getReportWithRetry(tabId),
     ]);
     setScanStatus(
       status ?? { tabId, state: 'idle', progress: 0, message: 'Idle.', updatedAt: Date.now() },
@@ -415,27 +458,33 @@ function App() {
 
     async function initializePopup() {
       try {
+        const tabParam = new URLSearchParams(window.location.search).get('tabId');
+        const forcedTabId = tabParam && /^\d+$/.test(tabParam) ? Number(tabParam) : null;
+
         const [localStorageState, settings, tabs] = await Promise.all([
-          ext.storage.local.get(API_KEY_STORAGE_KEY),
+          ext.storage.local.get([API_KEY_STORAGE_KEY, LEGACY_API_KEY_STORAGE_KEY]),
           sendMessage<SettingsResponse>({ type: 'GET_SETTINGS' }).catch(() => undefined),
-          ext.tabs.query({ active: true, currentWindow: true }),
+          forcedTabId == null
+            ? ext.tabs.query({ active: true, currentWindow: true })
+            : Promise.resolve([] as any[]),
         ]);
 
         if (cancelled) return;
 
         const storageHasKey =
-          typeof localStorageState?.[API_KEY_STORAGE_KEY] === 'string' &&
-          localStorageState[API_KEY_STORAGE_KEY].trim().length > 0;
+          (typeof localStorageState?.[API_KEY_STORAGE_KEY] === 'string' &&
+            localStorageState[API_KEY_STORAGE_KEY].trim().length > 0) ||
+          (typeof localStorageState?.[LEGACY_API_KEY_STORAGE_KEY] === 'string' &&
+            localStorageState[LEGACY_API_KEY_STORAGE_KEY].trim().length > 0);
         setHasApiKey(storageHasKey || Boolean(settings?.hasApiKey));
 
-        const currentTabId = tabs[0]?.id ?? null;
+        const currentTabId = forcedTabId ?? tabs[0]?.id ?? null;
         setActiveTabId(currentTabId);
         if (currentTabId != null) {
           await loadStatusAndReport(currentTabId);
-          const focusResponse = await sendMessage<FocusResponse>({
-            type: 'GET_FOCUS_FINDING',
-            tabId: currentTabId,
-          }).catch(() => ({ findingId: null }));
+          const focusResponse = await getFocusFindingWithRetry(currentTabId).catch(
+            () => ({ findingId: null }),
+          );
           if (focusResponse.findingId) {
             setFocusedFindingId(focusResponse.findingId);
             setExpandedId(focusResponse.findingId);
@@ -474,7 +523,7 @@ function App() {
           const reportResponse = await sendMessage<ReportResponse>({
             type: 'GET_REPORT',
             tabId: activeTabId,
-          });
+          }).catch(async () => getReportWithRetry(activeTabId));
           setReport(reportResponse?.report ?? null);
         }
       } catch {
@@ -484,6 +533,38 @@ function App() {
 
     return () => clearInterval(timer);
   }, [activeTabId, scanStatus.state]);
+
+  useEffect(() => {
+    if (activeTabId == null || report) return;
+    let cancelled = false;
+
+    const timer = setTimeout(async () => {
+      try {
+        const [reportResponse, focusResponse] = await Promise.all([
+          getReportWithRetry(activeTabId, 18),
+          getFocusFindingWithRetry(activeTabId, 12).catch(() => ({ findingId: null })),
+        ]);
+
+        if (cancelled) return;
+        if (reportResponse?.report) {
+          setReport(reportResponse.report);
+        }
+
+        if (focusResponse.findingId) {
+          setFocusedFindingId(focusResponse.findingId);
+          setExpandedId(focusResponse.findingId);
+          setFilter('all');
+        }
+      } catch {
+        // Leave empty-state if background remains unavailable.
+      }
+    }, 450);
+
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [activeTabId, report]);
 
   useEffect(() => {
     if (!focusedFindingId || !report) return;
@@ -509,10 +590,12 @@ function App() {
 
     let keyReady = hasApiKey;
     if (!keyReady) {
-      const stored = await ext.storage.local.get(API_KEY_STORAGE_KEY);
+      const stored = await ext.storage.local.get([API_KEY_STORAGE_KEY, LEGACY_API_KEY_STORAGE_KEY]);
       keyReady =
-        typeof stored?.[API_KEY_STORAGE_KEY] === 'string' &&
-        stored[API_KEY_STORAGE_KEY].trim().length > 0;
+        (typeof stored?.[API_KEY_STORAGE_KEY] === 'string' &&
+          stored[API_KEY_STORAGE_KEY].trim().length > 0) ||
+        (typeof stored?.[LEGACY_API_KEY_STORAGE_KEY] === 'string' &&
+          stored[LEGACY_API_KEY_STORAGE_KEY].trim().length > 0);
       if (keyReady) setHasApiKey(true);
       else return;
     }
@@ -638,7 +721,7 @@ function App() {
 
         {!hasApiKey && (
           <p className="mt-2 text-center text-[11px] text-muted-foreground">
-            Open <Settings className="inline size-3 -translate-y-px" /> settings to add your Gemini API key.
+            Open <Settings className="inline size-3 -translate-y-px" /> settings to add your OpenRouter API key.
           </p>
         )}
       </section>
