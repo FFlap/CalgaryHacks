@@ -49,11 +49,38 @@ type EvidenceResponse = {
   error?: string;
 };
 type FilterKey = 'all' | IssueType;
+type PopupView = 'review' | 'dashboard';
 type FindingEvidenceState =
   | { status: 'idle' }
   | { status: 'loading' }
   | { status: 'loaded'; evidence: FindingEvidence }
   | { status: 'error'; message: string };
+type DashboardFinding = {
+  quote: string;
+  issueTypes: IssueType[];
+  subtype?: string;
+  confidence: number;
+  severity: number;
+  rationale: string;
+};
+type DashboardPayload = {
+  generatedAt: string;
+  source: {
+    title: string;
+    url: string;
+    scanMessage: string;
+  };
+  summary: {
+    totalFindings: number;
+    misinformationCount: number;
+    fallacyCount: number;
+    biasCount: number;
+    averageConfidence: number;
+    averageSeverity: number;
+  };
+  biasSubtypes: Array<{ subtype: string; count: number }>;
+  findings: DashboardFinding[];
+};
 
 const runningStates = new Set<ScanStatus['state']>(['extracting', 'analyzing', 'highlighting']);
 
@@ -218,6 +245,78 @@ function getStepInfo(state: ScanStatus['state']) {
     };
   }
   return null;
+}
+
+function trimText(value: string, maxLength: number): string {
+  if (value.length <= maxLength) return value;
+  return `${value.slice(0, Math.max(0, maxLength - 1)).trimEnd()}...`;
+}
+
+function formatDashboardTimestamp(value: string): string {
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return 'Updated now';
+  return `Updated ${parsed.toLocaleString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    minute: '2-digit',
+  })}`;
+}
+
+function buildDashboardPayload(report: ScanReport | null, scanStatus: ScanStatus): DashboardPayload {
+  const findings = report?.findings ?? [];
+  const sortedFindings = [...findings].sort((left, right) => {
+    if (left.severity !== right.severity) return right.severity - left.severity;
+    return right.confidence - left.confidence;
+  });
+
+  const topFindings = sortedFindings.slice(0, 12).map((finding) => ({
+    quote: trimText(finding.quote, 260),
+    issueTypes: finding.issueTypes,
+    subtype: finding.subtype,
+    confidence: Number(finding.confidence.toFixed(3)),
+    severity: finding.severity,
+    rationale: trimText(finding.rationale, 320),
+  }));
+
+  const biasSubtypeCounts = new Map<string, number>();
+  for (const finding of findings) {
+    if (!finding.issueTypes.includes('bias')) continue;
+    const subtype = (finding.subtype || 'unspecified').toLowerCase().trim();
+    biasSubtypeCounts.set(subtype, (biasSubtypeCounts.get(subtype) ?? 0) + 1);
+  }
+  const biasSubtypes = [...biasSubtypeCounts.entries()]
+    .map(([subtype, count]) => ({ subtype, count }))
+    .sort((left, right) => right.count - left.count)
+    .slice(0, 8);
+
+  const averageConfidence =
+    findings.length > 0
+      ? findings.reduce((sum, finding) => sum + finding.confidence, 0) / findings.length
+      : 0;
+  const averageSeverity =
+    findings.length > 0
+      ? findings.reduce((sum, finding) => sum + finding.severity, 0) / findings.length
+      : 0;
+
+  return {
+    generatedAt: new Date().toISOString(),
+    source: {
+      title: report?.title || 'No page scanned yet',
+      url: report?.url || '',
+      scanMessage: scanStatus.message || 'Ready to scan',
+    },
+    summary: {
+      totalFindings: report?.summary.totalFindings ?? findings.length,
+      misinformationCount: report?.summary.misinformationCount ?? 0,
+      fallacyCount: report?.summary.fallacyCount ?? 0,
+      biasCount: report?.summary.biasCount ?? 0,
+      averageConfidence: Number(averageConfidence.toFixed(3)),
+      averageSeverity: Number(averageSeverity.toFixed(2)),
+    },
+    biasSubtypes,
+    findings: topFindings,
+  };
 }
 
 function StepProgressRing({
@@ -690,6 +789,7 @@ function App() {
   });
   const [report, setReport] = useState<ScanReport | null>(null);
   const [filter, setFilter] = useState<FilterKey>('all');
+  const [popupView, setPopupView] = useState<PopupView>('review');
   const [expandedId, setExpandedId] = useState<string | null>(null);
   const [focusedFindingId, setFocusedFindingId] = useState<string | null>(null);
   const [evidenceByFinding, setEvidenceByFinding] = useState<Record<string, FindingEvidenceState>>({});
@@ -933,7 +1033,6 @@ function App() {
         tabId: activeTabId,
         findingId,
       });
-      window.close();
     },
     [activeTabId],
   );
@@ -945,6 +1044,24 @@ function App() {
     if (filter === 'all') return findings;
     return findings.filter((f) => f.issueTypes.includes(filter));
   }, [report?.findings, filter]);
+
+  const dashboardPayload = useMemo(
+    () => buildDashboardPayload(report, scanStatus),
+    [report, scanStatus],
+  );
+  const dashboardSummary = dashboardPayload.summary;
+  const dashboardUpdatedLabel = formatDashboardTimestamp(dashboardPayload.generatedAt);
+  const confidencePct = Math.round(dashboardSummary.averageConfidence * 100);
+  const severityPct = Math.round((dashboardSummary.averageSeverity / 5) * 100);
+  const issueBreakdown = useMemo(
+    () => [
+      { key: 'misinformation', label: 'Misinformation', count: dashboardSummary.misinformationCount },
+      { key: 'fallacy', label: 'Fallacies', count: dashboardSummary.fallacyCount },
+      { key: 'bias', label: 'Bias Signals', count: dashboardSummary.biasCount },
+    ],
+    [dashboardSummary.biasCount, dashboardSummary.fallacyCount, dashboardSummary.misinformationCount],
+  );
+  const issueDenominator = Math.max(1, dashboardSummary.totalFindings);
 
   const isRunning = runningStates.has(scanStatus.state);
   const totalFindings = report?.summary.totalFindings ?? 0;
@@ -973,133 +1090,253 @@ function App() {
         />
       </header>
 
-      {/* ---- Scan section ---- */}
-      <section className="scan-section">
-        <div className="flex items-center gap-3">
-          <div className="relative flex items-center justify-center text-primary">
-            {isRunning ? (
-              <StepProgressRing
-                current={stepInfo?.current ?? 1}
-                total={stepInfo?.total ?? 3}
-                size={36}
-              />
-            ) : (
-              <div className="flex size-9 items-center justify-center rounded-full border border-border/60 bg-background/60">
-                {scanStatus.state === 'done' ? (
-                  <ShieldCheck className="size-4 text-emerald-600" />
-                ) : scanStatus.state === 'error' ? (
-                  <Gauge className="size-4 text-destructive" />
+      <nav className="popup-view-tabs" aria-label="Popup sections">
+        <button
+          type="button"
+          className={`popup-view-tab ${popupView === 'review' ? 'is-active' : ''}`}
+          onClick={() => setPopupView('review')}
+          aria-selected={popupView === 'review'}
+        >
+          Review
+        </button>
+        <button
+          type="button"
+          className={`popup-view-tab ${popupView === 'dashboard' ? 'is-active' : ''}`}
+          onClick={() => setPopupView('dashboard')}
+          aria-selected={popupView === 'dashboard'}
+        >
+          Dashboard
+        </button>
+      </nav>
+
+      {popupView === 'review' ? (
+        <>
+          {/* ---- Scan section ---- */}
+          <section className="scan-section">
+            <div className="flex items-center gap-3">
+              <div className="relative flex items-center justify-center text-primary">
+                {isRunning ? (
+                  <StepProgressRing
+                    current={stepInfo?.current ?? 1}
+                    total={stepInfo?.total ?? 3}
+                    size={36}
+                  />
                 ) : (
-                  <Search className="size-4 text-muted-foreground" />
+                  <div className="flex size-9 items-center justify-center rounded-full border border-border/60 bg-background/60">
+                    {scanStatus.state === 'done' ? (
+                      <ShieldCheck className="size-4 text-emerald-600" />
+                    ) : scanStatus.state === 'error' ? (
+                      <Gauge className="size-4 text-destructive" />
+                    ) : (
+                      <Search className="size-4 text-muted-foreground" />
+                    )}
+                  </div>
                 )}
               </div>
-            )}
-          </div>
-          <div className="flex-1">
-            <div className="flex items-center gap-2">
-              <span className="scan-state-label">{stateLabel(scanStatus.state)}</span>
+              <div className="flex-1">
+                <div className="flex items-center gap-2">
+                  <span className="scan-state-label">{stateLabel(scanStatus.state)}</span>
+                </div>
+                {stepInfo && (
+                  <p data-testid="scan-status" className="text-[11px] text-muted-foreground">
+                    {`Step ${stepInfo.current} of ${stepInfo.total}: ${stepInfo.label}`}
+                  </p>
+                )}
+                <p className="scan-message">{scanStatus.message}</p>
+              </div>
             </div>
-            {stepInfo && (
-              <p data-testid="scan-status" className="text-[11px] text-muted-foreground">
-                {`Step ${stepInfo.current} of ${stepInfo.total}: ${stepInfo.label}`}
+
+            <div className="scan-actions-grid">
+              <Button
+                data-testid="start-scan"
+                onClick={() => void startScan()}
+                disabled={isRunning || activeTabId == null || !hasApiKey}
+                className="mt-3 w-full"
+                size="sm"
+              >
+                {isRunning ? (
+                  <>
+                    <LoaderCircle className="size-3.5 animate-spin" />
+                    Scanning...
+                  </>
+                ) : (
+                  <>
+                    <Search className="size-3.5" />
+                    Scan Active Tab
+                  </>
+                )}
+              </Button>
+            </div>
+
+            {!hasApiKey && (
+              <p className="mt-2 text-center text-[11px] text-muted-foreground">
+                Open <Settings className="inline size-3 -translate-y-px" /> settings to add your OpenRouter API key.
               </p>
             )}
-            <p className="scan-message">{scanStatus.message}</p>
-          </div>
-        </div>
+          </section>
 
-        <Button
-          data-testid="start-scan"
-          onClick={() => void startScan()}
-          disabled={isRunning || activeTabId == null || !hasApiKey}
-          className="mt-3 w-full"
-          size="sm"
-        >
-          {isRunning ? (
-            <>
-              <LoaderCircle className="size-3.5 animate-spin" />
-              Scanning...
-            </>
-          ) : (
-            <>
-              <Search className="size-3.5" />
-              Scan Active Tab
-            </>
-          )}
-        </Button>
-
-        {!hasApiKey && (
-          <p className="mt-2 text-center text-[11px] text-muted-foreground">
-            Open <Settings className="inline size-3 -translate-y-px" /> settings to add your OpenRouter API key.
-          </p>
-        )}
-      </section>
-
-      {/* ---- Findings ---- */}
-      <section className="findings-section">
-        {/* Summary counters */}
-        <div className="findings-bar">
-          <span className="findings-bar-label">
-            {totalFindings} {totalFindings === 1 ? 'finding' : 'findings'}
-          </span>
-          <div className="flex gap-1.5">
-            <span className="counter counter--red">
-              {report?.summary.misinformationCount ?? 0}
-            </span>
-            <span className="counter counter--amber">
-              {report?.summary.fallacyCount ?? 0}
-            </span>
-            <span className="counter counter--sky">
-              {report?.summary.biasCount ?? 0}
-            </span>
-          </div>
-        </div>
-
-        {/* Filter chips */}
-        <div className="mb-2.5 flex gap-1">
-          {(['all', 'misinformation', 'fallacy', 'bias'] as FilterKey[]).map((opt) => (
-            <button
-              key={opt}
-              onClick={() => setFilter(opt)}
-              className={`filter-chip ${filter === opt ? 'filter-chip--active' : ''}`}
-            >
-              {opt === 'all' ? 'All' : labelForType(opt)}
-            </button>
-          ))}
-        </div>
-
-        {/* Findings list */}
-        <div className="findings-list">
-          {!report ? (
-            <div className="empty-state">
-              Run a scan to review the active page for credibility issues.
+          {/* ---- Findings ---- */}
+          <section className="findings-section">
+            {/* Summary counters */}
+            <div className="findings-bar">
+              <span className="findings-bar-label">
+                {totalFindings} {totalFindings === 1 ? 'finding' : 'findings'}
+              </span>
+              <div className="flex gap-1.5">
+                <span className="counter counter--red">
+                  {report?.summary.misinformationCount ?? 0}
+                </span>
+                <span className="counter counter--amber">
+                  {report?.summary.fallacyCount ?? 0}
+                </span>
+                <span className="counter counter--sky">
+                  {report?.summary.biasCount ?? 0}
+                </span>
+              </div>
             </div>
-          ) : report.findings.length === 0 ? (
-            <div className="empty-state empty-state--ok">
-              <ShieldCheck className="size-4 shrink-0" />
-              No high-confidence issues found.
+
+            {/* Filter chips */}
+            <div className="mb-2.5 flex gap-1">
+              {(['all', 'misinformation', 'fallacy', 'bias'] as FilterKey[]).map((opt) => (
+                <button
+                  key={opt}
+                  onClick={() => setFilter(opt)}
+                  className={`filter-chip ${filter === opt ? 'filter-chip--active' : ''}`}
+                >
+                  {opt === 'all' ? 'All' : labelForType(opt)}
+                </button>
+              ))}
             </div>
-          ) : filteredFindings.length === 0 ? (
-            <div className="empty-state">No findings for this filter.</div>
-          ) : (
-            filteredFindings.map((finding) => (
-              <FindingCard
-                key={finding.id}
-                finding={finding}
-                isExpanded={expandedId === finding.id}
-                isFocused={focusedFindingId === finding.id}
-                evidenceState={evidenceByFinding[finding.id] ?? { status: 'idle' }}
-                onToggle={() =>
-                  setExpandedId((prev) => (prev === finding.id ? null : finding.id))
-                }
-                onJump={() => void jumpToFinding(finding.id)}
-                onLoadEvidence={() => void loadFindingEvidence(finding.id)}
-                onRetryEvidence={() => void loadFindingEvidence(finding.id, true)}
-              />
-            ))
-          )}
-        </div>
-      </section>
+
+            {/* Findings list */}
+            <div className="findings-list">
+              {!report ? (
+                <div className="empty-state">
+                  Run a scan to review the active page for credibility issues.
+                </div>
+              ) : report.findings.length === 0 ? (
+                <div className="empty-state empty-state--ok">
+                  <ShieldCheck className="size-4 shrink-0" />
+                  No high-confidence issues found.
+                </div>
+              ) : filteredFindings.length === 0 ? (
+                <div className="empty-state">No findings for this filter.</div>
+              ) : (
+                filteredFindings.map((finding) => (
+                  <FindingCard
+                    key={finding.id}
+                    finding={finding}
+                    isExpanded={expandedId === finding.id}
+                    isFocused={focusedFindingId === finding.id}
+                    evidenceState={evidenceByFinding[finding.id] ?? { status: 'idle' }}
+                    onToggle={() =>
+                      setExpandedId((prev) => (prev === finding.id ? null : finding.id))
+                    }
+                    onJump={() => void jumpToFinding(finding.id)}
+                    onLoadEvidence={() => void loadFindingEvidence(finding.id)}
+                    onRetryEvidence={() => void loadFindingEvidence(finding.id, true)}
+                  />
+                ))
+              )}
+            </div>
+          </section>
+        </>
+      ) : (
+        <section className="mini-dashboard-section">
+          <div className="mini-dashboard-head">
+            <p className="mini-dashboard-title">{dashboardPayload.source.title}</p>
+            <p className="mini-dashboard-meta">{dashboardUpdatedLabel}</p>
+            {dashboardPayload.source.url && (
+              <p className="mini-dashboard-url">{dashboardPayload.source.url}</p>
+            )}
+          </div>
+
+          <div className="mini-kpi-grid">
+            <article className="mini-kpi-card">
+              <p className="mini-kpi-label">Total</p>
+              <p className="mini-kpi-value">{dashboardSummary.totalFindings}</p>
+            </article>
+            <article className="mini-kpi-card">
+              <p className="mini-kpi-label">Misinfo</p>
+              <p className="mini-kpi-value mini-kpi-value--red">{dashboardSummary.misinformationCount}</p>
+            </article>
+            <article className="mini-kpi-card">
+              <p className="mini-kpi-label">Fallacies</p>
+              <p className="mini-kpi-value mini-kpi-value--amber">{dashboardSummary.fallacyCount}</p>
+            </article>
+            <article className="mini-kpi-card">
+              <p className="mini-kpi-label">Bias</p>
+              <p className="mini-kpi-value mini-kpi-value--blue">{dashboardSummary.biasCount}</p>
+            </article>
+          </div>
+
+          <div className="mini-quality-grid">
+            <div>
+              <div className="mini-quality-row">
+                <span>Confidence</span>
+                <span>{confidencePct}%</span>
+              </div>
+              <div className="mini-meter-track">
+                <div className="mini-meter-fill mini-meter-fill--blue" style={{ width: `${confidencePct}%` }} />
+              </div>
+            </div>
+            <div>
+              <div className="mini-quality-row">
+                <span>Severity</span>
+                <span>{dashboardSummary.averageSeverity.toFixed(1)}/5</span>
+              </div>
+              <div className="mini-meter-track">
+                <div className="mini-meter-fill mini-meter-fill--amber" style={{ width: `${severityPct}%` }} />
+              </div>
+            </div>
+          </div>
+
+          <div className="mini-issue-list">
+            {issueBreakdown.map((row) => {
+              const pct = Math.round((row.count / issueDenominator) * 100);
+              return (
+                <div key={row.key}>
+                  <div className="mini-quality-row">
+                    <span>{row.label}</span>
+                    <span>{row.count}</span>
+                  </div>
+                  <div className="mini-meter-track">
+                    <div className="mini-meter-fill mini-meter-fill--neutral" style={{ width: `${pct}%` }} />
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+
+          <div className="mini-flagged-head">Flagged Snippets</div>
+          <div className="mini-flagged-list">
+            {dashboardPayload.findings.length === 0 ? (
+              <div className="empty-state empty-state--ok">
+                <ShieldCheck className="size-4 shrink-0" />
+                No high-confidence issues found.
+              </div>
+            ) : (
+              dashboardPayload.findings.slice(0, 8).map((finding, index) => (
+                <article key={`${finding.quote}-${index}`} className="mini-flagged-item">
+                  <p className="mini-flagged-quote">{finding.quote}</p>
+                  <div className="mini-flagged-meta">
+                    <div className="mini-tag-row">
+                      {finding.issueTypes.map((issue) => (
+                        <span key={`${finding.quote}-${issue}`} className={`mini-tag mini-tag--${issue}`}>
+                          {labelForType(issue)}
+                        </span>
+                      ))}
+                    </div>
+                    <span>{Math.round(finding.confidence * 100)}%</span>
+                    <span>{finding.severity}/5</span>
+                  </div>
+                  <p className="mini-flagged-rationale">{finding.rationale}</p>
+                </article>
+              ))
+            )}
+          </div>
+        </section>
+      )}
     </div>
   );
 }
