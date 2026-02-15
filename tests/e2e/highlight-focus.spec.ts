@@ -55,18 +55,6 @@ test('click-origin focus routing surfaces reasoning in popup', async () => {
               severity: 2,
               rationale: 'Test rationale from highlight click flow.',
               correction: 'Test correction.',
-              citations: [
-                {
-                  title: 'Example source',
-                  url: 'https://example.com/',
-                  domain: 'example.com',
-                },
-                {
-                  title: 'Example source 2',
-                  url: 'https://iana.org/',
-                  domain: 'iana.org',
-                },
-              ],
               highlightApplied: true,
             },
           ],

@@ -8,12 +8,6 @@ export const FOX_NEWS_URL =
 
 export type IssueType = 'misinformation' | 'fallacy' | 'bias';
 
-export interface Citation {
-  title: string;
-  url: string;
-  domain?: string;
-}
-
 export interface Finding {
   id: string;
   issueTypes: IssueType[];
@@ -23,7 +17,6 @@ export interface Finding {
   severity: number;
   rationale: string;
   correction?: string;
-  citations?: Citation[];
 }
 
 export interface ScanReport {
@@ -349,16 +342,6 @@ export function coerceReport(payload: unknown): ScanReport {
         typeof findingRaw.correction === 'string'
           ? findingRaw.correction
           : undefined,
-      citations: Array.isArray(findingRaw.citations)
-        ? findingRaw.citations
-            .filter(isRecord)
-            .map((citation, citationIdx) => ({
-              title: asString(citation.title, `findings[${idx}].citations[${citationIdx}].title`),
-              url: asString(citation.url, `findings[${idx}].citations[${citationIdx}].url`),
-              domain:
-                typeof citation.domain === 'string' ? citation.domain : undefined,
-            }))
-        : undefined,
     };
 
     return finding;
@@ -388,15 +371,6 @@ export function assertStructuralRules(report: ScanReport): void {
         (finding.correction ?? '').trim().length,
         `Finding ${idx} marked misinformation must include correction.`,
       ).toBeGreaterThan(0);
-
-      const citations = finding.citations ?? [];
-      for (const citation of citations) {
-        const protocol = new URL(citation.url).protocol;
-        expect(
-          protocol === 'http:' || protocol === 'https:',
-          `Citation URL must use HTTP(S): ${citation.url}`,
-        ).toBeTruthy();
-      }
     }
 
     if (finding.issueTypes.includes('fallacy')) {

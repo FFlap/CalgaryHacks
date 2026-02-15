@@ -8,12 +8,6 @@ export type ScanState =
 
 export type IssueType = 'misinformation' | 'fallacy' | 'bias';
 
-export interface Citation {
-  title: string;
-  url: string;
-  domain?: string;
-}
-
 export interface Finding {
   id: string;
   quote: string;
@@ -23,7 +17,6 @@ export interface Finding {
   severity: number;
   rationale: string;
   correction?: string;
-  citations: Citation[];
   highlightApplied?: boolean;
 }
 
@@ -88,5 +81,4 @@ export interface RawFinding {
   severity: number;
   rationale: string;
   correction?: string;
-  citations?: Citation[];
 }

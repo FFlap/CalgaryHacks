@@ -1,7 +1,6 @@
 import { callOpenRouterJson } from '@/lib/openrouter';
 import type {
   CandidateClaim,
-  Citation,
   Finding,
   IssueType,
   RawFinding,
@@ -67,45 +66,6 @@ function toConfidence(value: unknown): number {
   return Math.max(0, Math.min(1, asNumber));
 }
 
-function sanitizeCitations(value: unknown): Citation[] {
-  const citations: Citation[] = [];
-  const seen = new Set<string>();
-
-  const pushCitation = (title: string, url: string) => {
-    if (!/^https?:\/\//i.test(url) || seen.has(url)) {
-      return;
-    }
-    seen.add(url);
-    citations.push({
-      title,
-      url,
-      domain: (() => {
-        try {
-          return new URL(url).hostname;
-        } catch {
-          return undefined;
-        }
-      })(),
-    });
-  };
-
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      if (!item || typeof item !== 'object') {
-        continue;
-      }
-      const title = String((item as { title?: unknown }).title ?? '').trim();
-      const url = String((item as { url?: unknown }).url ?? '').trim();
-      if (!title || !url) {
-        continue;
-      }
-      pushCitation(title, url);
-    }
-  }
-
-  return citations;
-}
-
 function buildCandidatePrompt(url: string, title: string, content: string): string {
   return [
     'You are a strict claim miner focused on misinformation, fallacies, and bias.',
@@ -139,10 +99,10 @@ function buildVerificationPrompt(
     'Approved fallacy subtypes: straw man, ad hominem, false dilemma, hasty generalization, slippery slope, appeal to fear.',
     'Approved bias subtypes: loaded language, cherry picking, framing bias, confirmation framed rhetoric.',
     'Return strict JSON with shape:',
-    '{"findings":[{"quote":"string","issueTypes":["misinformation"|"fallacy"|"bias"],"subtype":"string optional","confidence":0.0,"severity":1,"rationale":"string","correction":"string optional","citations":[{"title":"string","url":"https://..."}]}]}',
+    '{"findings":[{"quote":"string","issueTypes":["misinformation"|"fallacy"|"bias"],"subtype":"string optional","confidence":0.0,"severity":1,"rationale":"string","correction":"string optional"}]}',
     'Rules:',
     '- Output only high-confidence items.',
-    '- For misinformation include correction and citations only when the source is clear and reliable.',
+    '- For misinformation include correction.',
     '- If a quote is not supportable as problematic, omit it.',
     `URL: ${url}`,
     `TITLE: ${title}`,
@@ -214,7 +174,6 @@ function coerceRawFindings(payload: unknown): RawFinding[] {
       severity: toSeverity((item as { severity?: unknown }).severity),
       rationale: String((item as { rationale?: unknown }).rationale ?? '').trim(),
       correction: String((item as { correction?: unknown }).correction ?? '').trim() || undefined,
-      citations: sanitizeCitations((item as { citations?: unknown }).citations),
     });
   }
   return normalized;
@@ -276,7 +235,6 @@ function mergeFindings(rawFindings: RawFinding[]): Finding[] {
         severity: rawFinding.severity,
         rationale: rawFinding.rationale,
         correction: rawFinding.correction,
-        citations: [...(rawFinding.citations ?? [])],
       });
       continue;
     }
@@ -294,12 +252,6 @@ function mergeFindings(rawFindings: RawFinding[]): Finding[] {
     if (rawFinding.rationale.length > existing.rationale.length) {
       existing.rationale = rawFinding.rationale;
     }
-
-    const citationMap = new Map(existing.citations.map((citation) => [citation.url, citation]));
-    for (const citation of rawFinding.citations ?? []) {
-      citationMap.set(citation.url, citation);
-    }
-    existing.citations = [...citationMap.values()];
   }
 
   return [...merged.values()].sort((left, right) => {

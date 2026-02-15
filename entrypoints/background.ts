@@ -264,7 +264,7 @@ async function runScan(tabId: number): Promise<void> {
   }
 
   try {
-    setStatus(tabId, 'extracting', 'Collecting visible text from the page…', 0.15);
+    setStatus(tabId, 'extracting', 'Collecting visible text from the page...', 0.15);
 
     const extraction = await executeOnTab<ExtractionResult>(tabId, extractVisibleTextInPage);
     if (!extraction.text || extraction.text.length < 50) {
@@ -274,7 +274,7 @@ async function runScan(tabId: number): Promise<void> {
     const truncatedText = extraction.text.slice(0, MAX_ANALYSIS_CHARS);
     const truncated = extraction.text.length > MAX_ANALYSIS_CHARS;
 
-    setStatus(tabId, 'analyzing', 'Analyzing claims with OpenRouter Trinity…', 0.55);
+    setStatus(tabId, 'analyzing', 'Analyzing claims with OpenRouter Trinity...', 0.55);
     const report = await analyzeClaims({
       apiKey,
       tabId,
@@ -285,7 +285,7 @@ async function runScan(tabId: number): Promise<void> {
       analyzedChars: truncatedText.length,
     });
 
-    setStatus(tabId, 'highlighting', 'Placing inline evidence highlights…', 0.82);
+    setStatus(tabId, 'highlighting', 'Placing inline evidence highlights...', 0.82);
 
     const highlightResult = await executeOnTab<{ appliedIds: string[]; appliedCount: number }>(
       tabId,
@@ -353,7 +353,7 @@ export default defineBackground(() => {
 
       case 'START_SCAN': {
           const tabId = await resolveScannableTabId(message.tabId);
-          setStatus(tabId, 'extracting', 'Preparing scan…', 0.05);
+          setStatus(tabId, 'extracting', 'Preparing scan...', 0.05);
           void startScan(tabId);
           sendResponse({ ok: true, tabId });
           return;

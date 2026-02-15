@@ -1,10 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ChevronDown,
-  ExternalLink,
   Gauge,
   KeyRound,
-  Link2,
   LoaderCircle,
   Radar,
   Search,
@@ -144,6 +142,80 @@ function stateLabel(state: ScanStatus['state']) {
   return 'Ready';
 }
 
+const scanStepOrder: Array<{ state: ScanStatus['state']; label: string }> = [
+  { state: 'extracting', label: 'Extract page text' },
+  { state: 'analyzing', label: 'Analyze claims' },
+  { state: 'highlighting', label: 'Add inline highlights' },
+];
+
+function getStepInfo(state: ScanStatus['state']) {
+  const total = scanStepOrder.length;
+  const index = scanStepOrder.findIndex((step) => step.state === state);
+  if (index >= 0) {
+    return {
+      current: index + 1,
+      total,
+      label: scanStepOrder[index].label,
+    };
+  }
+  if (state === 'done') {
+    return {
+      current: total,
+      total,
+      label: 'Completed',
+    };
+  }
+  return null;
+}
+
+function StepProgressRing({
+  current,
+  total,
+  size = 36,
+}: {
+  current: number;
+  total: number;
+  size?: number;
+}) {
+  const safeTotal = Math.max(1, total);
+  const progress = Math.max(0, Math.min(1, current / safeTotal));
+  const r = (size - 4) / 2;
+  const circumference = 2 * Math.PI * r;
+  const offset = circumference * (1 - progress);
+
+  return (
+    <div className="step-ring" aria-label={`Scan progress ${current}/${safeTotal}`}>
+      <svg width={size} height={size} className="progress-ring">
+        <circle
+          cx={size / 2}
+          cy={size / 2}
+          r={r}
+          fill="none"
+          stroke="currentColor"
+          strokeWidth={2.5}
+          opacity={0.18}
+        />
+        <circle
+          cx={size / 2}
+          cy={size / 2}
+          r={r}
+          fill="none"
+          stroke="currentColor"
+          strokeWidth={2.5}
+          strokeLinecap="round"
+          strokeDasharray={circumference}
+          strokeDashoffset={offset}
+          className="transition-[stroke-dashoffset] duration-500 ease-out"
+          transform={`rotate(-90 ${size / 2} ${size / 2})`}
+        />
+      </svg>
+      <span className="step-ring-label">
+        {current}/{safeTotal}
+      </span>
+    </div>
+  );
+}
+
 /* ------------------------------------------------------------------ */
 /*  Settings Modal                                                    */
 /* ------------------------------------------------------------------ */
@@ -229,7 +301,7 @@ function SettingsModal({
             onKeyDown={(e) => {
               if (e.key === 'Enter') void save();
             }}
-            placeholder={hasApiKey ? 'Enter new key to replace…' : 'Paste your OpenRouter API key'}
+            placeholder={hasApiKey ? 'Enter new key to replace...' : 'Paste your OpenRouter API key'}
             className="font-mono text-xs"
           />
           <Button
@@ -345,26 +417,6 @@ function FindingCard({
             </div>
           )}
 
-          {/* Citations */}
-          {finding.citations.length > 0 && (
-            <ul className="mb-2.5 space-y-1">
-              {finding.citations.map((c) => (
-                <li key={`${finding.id}-${c.url}`}>
-                  <a
-                    href={c.url}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="inline-flex items-center gap-1 text-[11.5px] text-muted-foreground underline decoration-border underline-offset-2 transition-colors hover:text-foreground"
-                  >
-                    <Link2 className="size-3 shrink-0" />
-                    {c.title}
-                    <ExternalLink className="size-2.5 opacity-40" />
-                  </a>
-                </li>
-              ))}
-            </ul>
-          )}
-
           {/* Jump action */}
           <Button
             data-testid="jump-to-highlight"
@@ -382,43 +434,6 @@ function FindingCard({
         </div>
       </div>
     </article>
-  );
-}
-
-/* ------------------------------------------------------------------ */
-/*  Progress ring                                                     */
-/* ------------------------------------------------------------------ */
-
-function ProgressRing({ progress, size = 32 }: { progress: number; size?: number }) {
-  const r = (size - 4) / 2;
-  const circ = 2 * Math.PI * r;
-  const offset = circ * (1 - Math.min(progress, 1));
-
-  return (
-    <svg width={size} height={size} className="progress-ring">
-      <circle
-        cx={size / 2}
-        cy={size / 2}
-        r={r}
-        fill="none"
-        stroke="currentColor"
-        strokeWidth={2.5}
-        opacity={0.12}
-      />
-      <circle
-        cx={size / 2}
-        cy={size / 2}
-        r={r}
-        fill="none"
-        stroke="currentColor"
-        strokeWidth={2.5}
-        strokeLinecap="round"
-        strokeDasharray={circ}
-        strokeDashoffset={offset}
-        className="transition-[stroke-dashoffset] duration-500"
-        transform={`rotate(-90 ${size / 2} ${size / 2})`}
-      />
-    </svg>
   );
 }
 
@@ -605,7 +620,7 @@ function App() {
         tabId: activeTabId,
         state: 'extracting',
         progress: 0.05,
-        message: 'Preparing scan\u2026',
+        message: 'Preparing scan...',
         updatedAt: Date.now(),
       });
       await sendMessage<{ ok: boolean; tabId: number }>({ type: 'START_SCAN' });
@@ -644,6 +659,7 @@ function App() {
 
   const isRunning = runningStates.has(scanStatus.state);
   const totalFindings = report?.summary.totalFindings ?? 0;
+  const stepInfo = getStepInfo(scanStatus.state);
 
   /* ---- render ---- */
 
@@ -673,7 +689,11 @@ function App() {
         <div className="flex items-center gap-3">
           <div className="relative flex items-center justify-center text-primary">
             {isRunning ? (
-              <ProgressRing progress={scanStatus.progress} size={36} />
+              <StepProgressRing
+                current={stepInfo?.current ?? 1}
+                total={stepInfo?.total ?? 3}
+                size={36}
+              />
             ) : (
               <div className="flex size-9 items-center justify-center rounded-full border border-border/60 bg-background/60">
                 {scanStatus.state === 'done' ? (
@@ -689,12 +709,12 @@ function App() {
           <div className="flex-1">
             <div className="flex items-center gap-2">
               <span className="scan-state-label">{stateLabel(scanStatus.state)}</span>
-              {isRunning && (
-                <span className="text-[11px] tabular-nums text-muted-foreground">
-                  {Math.round(scanStatus.progress * 100)}%
-                </span>
-              )}
             </div>
+            {stepInfo && (
+              <p data-testid="scan-status" className="text-[11px] text-muted-foreground">
+                {`Step ${stepInfo.current} of ${stepInfo.total}: ${stepInfo.label}`}
+              </p>
+            )}
             <p className="scan-message">{scanStatus.message}</p>
           </div>
         </div>
@@ -709,7 +729,7 @@ function App() {
           {isRunning ? (
             <>
               <LoaderCircle className="size-3.5 animate-spin" />
-              Scanning\u2026
+              Scanning...
             </>
           ) : (
             <>

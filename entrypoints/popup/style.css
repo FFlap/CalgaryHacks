@@ -182,6 +182,25 @@
   display: block;
 }
 
+.step-ring {
+  position: relative;
+  width: 36px;
+  height: 36px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--primary);
+}
+
+.step-ring-label {
+  position: absolute;
+  font-size: 0.58rem;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: 0.02em;
+  color: var(--foreground);
+}
+
 /* ------------------------------------------------------------------ */
 /*  Findings section                                                  */
 /* ------------------------------------------------------------------ */
