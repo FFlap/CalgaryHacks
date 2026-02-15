@@ -1209,7 +1209,6 @@ function App() {
         tabId: activeTabId,
         findingId,
       });
-      window.close();
     },
     [activeTabId],
   );
