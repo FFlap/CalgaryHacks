@@ -39,6 +39,15 @@ const ext = ((globalThis as any).browser ?? (globalThis as any).chrome) as typeo
 const API_KEY_STORAGE_KEY = 'openrouter_api_key';
 const LEGACY_API_KEY_STORAGE_KEY = 'gemini_api_key';
 const GOOGLE_FACT_CHECK_API_KEY_STORAGE_KEY = 'google_fact_check_api_key';
+const LEGACY_GOOGLE_FACT_CHECK_API_KEY_STORAGE_KEYS = [
+  'google_factcheck_api_key',
+  'googleFactCheckApiKey',
+  'GOOGLE_FACT_CHECK_API_KEY',
+] as const;
+const GOOGLE_FACT_CHECK_API_KEY_STORAGE_KEYS = [
+  GOOGLE_FACT_CHECK_API_KEY_STORAGE_KEY,
+  ...LEGACY_GOOGLE_FACT_CHECK_API_KEY_STORAGE_KEYS,
+] as const;
 
 type ReportResponse = { report: ScanReport | null };
 type SettingsResponse = { hasApiKey: boolean; hasGoogleFactCheckApiKey?: boolean };
@@ -522,6 +531,9 @@ function SettingsModal({
       const trimmed = googleFactCheckApiKey.trim();
       await ext.storage.local.set({
         [GOOGLE_FACT_CHECK_API_KEY_STORAGE_KEY]: trimmed,
+        ...Object.fromEntries(
+          LEGACY_GOOGLE_FACT_CHECK_API_KEY_STORAGE_KEYS.map((key) => [key, trimmed]),
+        ),
       });
       await sendMessage<{ ok: boolean; hasGoogleFactCheckApiKey: boolean }>({
         type: 'SAVE_GOOGLE_FACT_CHECK_API_KEY',
@@ -842,7 +854,8 @@ function FindingCard({
 
                 {!evidence.apiStatus.googleFactCheckConfigured && (
                   <p className="evidence-warning">
-                    Google Fact Check API key is not configured in Settings.
+                    Google Fact Check key not detected for this extension profile. Add it in
+                    Settings under Google Fact Check API key (separate from OpenRouter).
                   </p>
                 )}
 
@@ -977,7 +990,7 @@ function App() {
           ext.storage.local.get([
             API_KEY_STORAGE_KEY,
             LEGACY_API_KEY_STORAGE_KEY,
-            GOOGLE_FACT_CHECK_API_KEY_STORAGE_KEY,
+            ...GOOGLE_FACT_CHECK_API_KEY_STORAGE_KEYS,
           ]),
           sendMessage<SettingsResponse>({ type: 'GET_SETTINGS' }).catch(() => undefined),
           forcedTabId == null
@@ -993,8 +1006,11 @@ function App() {
           (typeof localStorageState?.[LEGACY_API_KEY_STORAGE_KEY] === 'string' &&
             localStorageState[LEGACY_API_KEY_STORAGE_KEY].trim().length > 0);
         const storageHasGoogleFactCheckKey =
-          typeof localStorageState?.[GOOGLE_FACT_CHECK_API_KEY_STORAGE_KEY] === 'string' &&
-          localStorageState[GOOGLE_FACT_CHECK_API_KEY_STORAGE_KEY].trim().length > 0;
+          GOOGLE_FACT_CHECK_API_KEY_STORAGE_KEYS.some(
+            (key) =>
+              typeof localStorageState?.[key] === 'string' &&
+              localStorageState[key].trim().length > 0,
+          );
         setHasApiKey(storageHasKey || Boolean(settings?.hasApiKey));
         setHasGoogleFactCheckApiKey(
           storageHasGoogleFactCheckKey || Boolean(settings?.hasGoogleFactCheckApiKey),

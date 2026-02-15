@@ -3,6 +3,15 @@ import type { FindingEvidence, ScanReport } from '@/lib/types';
 const API_KEY_STORAGE_KEY = 'openrouter_api_key';
 const LEGACY_API_KEY_STORAGE_KEY = 'gemini_api_key';
 const GOOGLE_FACT_CHECK_API_KEY_STORAGE_KEY = 'google_fact_check_api_key';
+const LEGACY_GOOGLE_FACT_CHECK_API_KEY_STORAGE_KEYS = [
+  'google_factcheck_api_key',
+  'googleFactCheckApiKey',
+  'GOOGLE_FACT_CHECK_API_KEY',
+] as const;
+const GOOGLE_FACT_CHECK_API_KEY_STORAGE_KEYS = [
+  GOOGLE_FACT_CHECK_API_KEY_STORAGE_KEY,
+  ...LEGACY_GOOGLE_FACT_CHECK_API_KEY_STORAGE_KEYS,
+] as const;
 const REPORT_PREFIX = 'scan_report_';
 const EVIDENCE_PREFIX = 'finding_evidence_';
 
@@ -26,15 +35,42 @@ export async function hasApiKey(): Promise<boolean> {
 }
 
 export async function saveGoogleFactCheckApiKey(apiKey: string): Promise<void> {
+  const trimmed = apiKey.trim();
   await ext.storage.local.set({
-    [GOOGLE_FACT_CHECK_API_KEY_STORAGE_KEY]: apiKey,
+    [GOOGLE_FACT_CHECK_API_KEY_STORAGE_KEY]: trimmed,
+    ...Object.fromEntries(
+      LEGACY_GOOGLE_FACT_CHECK_API_KEY_STORAGE_KEYS.map((key) => [key, trimmed]),
+    ),
   });
 }
 
 export async function getGoogleFactCheckApiKey(): Promise<string | null> {
-  const stored = await ext.storage.local.get([GOOGLE_FACT_CHECK_API_KEY_STORAGE_KEY]);
-  const value = stored[GOOGLE_FACT_CHECK_API_KEY_STORAGE_KEY];
-  return typeof value === 'string' && value.trim().length > 0 ? value : null;
+  const localStored = await ext.storage.local.get([...GOOGLE_FACT_CHECK_API_KEY_STORAGE_KEYS]);
+  for (const key of GOOGLE_FACT_CHECK_API_KEY_STORAGE_KEYS) {
+    const value = localStored[key];
+    if (typeof value === 'string' && value.trim().length > 0) {
+      if (key !== GOOGLE_FACT_CHECK_API_KEY_STORAGE_KEY) {
+        await ext.storage.local.set({
+          [GOOGLE_FACT_CHECK_API_KEY_STORAGE_KEY]: value.trim(),
+        });
+      }
+      return value.trim();
+    }
+  }
+
+  // Older builds may have used sync storage; keep compatibility.
+  const syncStored = await ext.storage.sync.get([...GOOGLE_FACT_CHECK_API_KEY_STORAGE_KEYS]);
+  for (const key of GOOGLE_FACT_CHECK_API_KEY_STORAGE_KEYS) {
+    const value = syncStored[key];
+    if (typeof value === 'string' && value.trim().length > 0) {
+      await ext.storage.local.set({
+        [GOOGLE_FACT_CHECK_API_KEY_STORAGE_KEY]: value.trim(),
+      });
+      return value.trim();
+    }
+  }
+
+  return null;
 }
 
 export async function hasGoogleFactCheckApiKey(): Promise<boolean> {
