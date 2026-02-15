@@ -263,6 +263,7 @@ export function buildEvidenceQueryPack(
   const contextSummary = pageContext?.summary ? trimWords(pageContext.summary, 20) : '';
   const contextTopicPhrase = contextTopics.slice(0, 5).join(' ').trim();
   const contextEntityPhrase = contextEntities.slice(0, 2).join(' ').trim();
+  const correctionHint = correction ? trimWords(correction, 14) : '';
 
   const intent: EvidenceQueryPack['intent'] = finding.issueTypes.includes('misinformation')
     ? 'misinformation'
@@ -302,13 +303,27 @@ export function buildEvidenceQueryPack(
     topicTerms.slice(0, 4).join(' '),
   ]);
 
-  const pubmedQueries = uniqueStrings([
-    topicTerms.slice(0, 6).join(' '),
-    contextTopicPhrase,
-    contextSummary ? `${topicTerms.slice(0, 4).join(' ')} ${contextSummary}` : '',
-    contextSummary,
-    compactClaim,
-  ]);
+  const pubmedCore = topicTerms.slice(0, 6).join(' ');
+  const pubmedQueries = uniqueStrings(
+    intent === 'misinformation'
+      ? [
+          `${pubmedCore} systematic review meta-analysis`,
+          `${pubmedCore} consensus cohort study`,
+          correctionHint ? `${pubmedCore} ${correctionHint}` : '',
+          pubmedCore,
+          contextTopicPhrase,
+          contextSummary ? `${topicTerms.slice(0, 4).join(' ')} ${contextSummary}` : '',
+          contextSummary,
+          compactClaim,
+        ]
+      : [
+          pubmedCore,
+          contextTopicPhrase,
+          contextSummary ? `${topicTerms.slice(0, 4).join(' ')} ${contextSummary}` : '',
+          contextSummary,
+          compactClaim,
+        ],
+  );
 
   const gdeltQueries = uniqueStrings([
     intent === 'misinformation'

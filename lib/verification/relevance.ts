@@ -139,6 +139,8 @@ function buildPrompt(input: RerankInput, candidates: CandidateRow[]): string {
     'Task: score whether each candidate is truly relevant to evaluating the claim substance.',
     'Reject entity-only matches (e.g., person biography pages) when they do not address the claim topic.',
     'For misinformation findings, prefer critical/neutral/mixed verification context over supportive-only context.',
+    'For PubMed candidates, prefer systematic reviews, meta-analyses, large cohort studies, and consensus evidence.',
+    'Mark retracted papers, editorials, letters, and single-study query echoes as not useful unless no stronger evidence exists.',
     'Return strict JSON only with shape:',
     '{"items":[{"id":"string","relevance":0.0,"useful":true,"stance":"critical|supportive|neutral|mixed|unknown"}]}',
     'Scoring guidance:',
