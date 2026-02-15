@@ -2,6 +2,10 @@ import type { EmbeddedPanelUpdate, IssueType, ScanReport, ScanStatus, Transcript
 
 const PANEL_ID = 'cred-youtube-panel-root';
 const STYLE_ID = 'cred-youtube-panel-style';
+const TIMELINE_MARKER_HOST_ATTR = 'data-cred-timeline-host';
+const TIMELINE_MARKER_LAYER_CLASS = 'cred-yt-timeline-markers';
+const TIMELINE_MARKER_CLASS = 'cred-yt-timeline-marker';
+const TIMELINE_MARKER_TEST_ID = 'yt-timeline-marker';
 const URL_CHECK_INTERVAL_MS = 900;
 const POLL_INTERVAL_MS = 1600;
 
@@ -13,6 +17,15 @@ interface EmbeddedStateResponse {
   tabId: number | null;
   status: ScanStatus;
   report: ScanReport | null;
+}
+
+interface TimelineIssueMarker {
+  startSec: number;
+  endSec: number;
+  startLabel: string;
+  endLabel: string;
+  issueTypes: IssueType[];
+  count: number;
 }
 
 const runningStates = new Set<ScanStatus['state']>(['extracting', 'analyzing', 'highlighting']);
@@ -66,6 +79,130 @@ function seekVideo(seconds: number) {
   const video = document.querySelector<HTMLVideoElement>('video');
   if (!video || !Number.isFinite(seconds) || seconds < 0) return;
   video.currentTime = seconds;
+}
+
+function formatTimeLabel(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return '0:00';
+  const rounded = Math.max(0, Math.floor(seconds));
+  const hours = Math.floor(rounded / 3600);
+  const minutes = Math.floor((rounded % 3600) / 60);
+  const secs = rounded % 60;
+  if (hours > 0) return `${hours}:${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+  return `${minutes}:${String(secs).padStart(2, '0')}`;
+}
+
+function timelineMarkerColor(issueTypes: IssueType[]): string {
+  const unique = Array.from(new Set(issueTypes)).sort();
+  if (unique.length === 0) return '#1a73e8';
+  if (unique.length === 1) {
+    if (unique[0] === 'misinformation') return '#cf3a2b';
+    if (unique[0] === 'fallacy') return '#c7830a';
+    return '#1a73e8';
+  }
+  const stops = unique
+    .map((issue, index) => {
+      const color =
+        issue === 'misinformation' ? '#cf3a2b' : issue === 'fallacy' ? '#c7830a' : '#1a73e8';
+      const start = Math.round((index / unique.length) * 100);
+      const end = Math.round(((index + 1) / unique.length) * 100);
+      return `${color} ${start}% ${end}%`;
+    })
+    .join(', ');
+  return `linear-gradient(180deg, ${stops})`;
+}
+
+function readTimestampEndSec(finding: ScanReport['findings'][number]): number | null {
+  const candidate = (finding as { timestampEndSec?: unknown }).timestampEndSec;
+  if (typeof candidate === 'number' && Number.isFinite(candidate) && candidate >= 0) {
+    return candidate;
+  }
+  return null;
+}
+
+function readTimestampEndLabel(finding: ScanReport['findings'][number]): string | null {
+  const candidate = (finding as { timestampEndLabel?: unknown }).timestampEndLabel;
+  if (typeof candidate === 'string' && candidate.trim().length > 0) {
+    return candidate.trim();
+  }
+  return null;
+}
+
+function collectTimelineIssueMarkers(
+  findings: ScanReport['findings'],
+  transcriptSegments: TranscriptSegment[],
+  durationSec: number,
+): TimelineIssueMarker[] {
+  const sortedSegments = [...transcriptSegments]
+    .filter((segment) => Number.isFinite(segment.startSec))
+    .sort((left, right) => left.startSec - right.startSec);
+
+  const resolveEndSec = (startSec: number, finding: ScanReport['findings'][number]): number => {
+    const explicitEndSec = readTimestampEndSec(finding);
+    if (explicitEndSec != null && explicitEndSec > startSec + 0.2) {
+      return explicitEndSec;
+    }
+
+    let matchedIndex = -1;
+    let bestDelta = Number.POSITIVE_INFINITY;
+    for (let index = 0; index < sortedSegments.length; index += 1) {
+      const segment = sortedSegments[index];
+      const delta = Math.abs(segment.startSec - startSec);
+      if (delta < bestDelta) {
+        bestDelta = delta;
+        matchedIndex = index;
+      }
+      if (segment.startSec > startSec + 4) break;
+    }
+
+    if (matchedIndex >= 0 && bestDelta <= 4) {
+      const next = sortedSegments[matchedIndex + 1];
+      if (next && next.startSec > startSec + 0.2) {
+        return next.startSec;
+      }
+    }
+
+    return Math.min(durationSec, startSec + 8);
+  };
+
+  const clusters = new Map<string, TimelineIssueMarker>();
+  for (const finding of findings) {
+    if (!Number.isFinite(finding.timestampSec)) continue;
+    const rawStartSec = Math.max(0, finding.timestampSec as number);
+    const startSec = Math.min(rawStartSec, Math.max(0, durationSec - 0.25));
+    const unclampedEndSec = resolveEndSec(startSec, finding);
+    const safeEndSec = Math.max(startSec + 0.2, Math.min(durationSec, unclampedEndSec));
+
+    const bucketStart = Math.round(startSec * 2) / 2;
+    const bucketEnd = Math.max(bucketStart + 0.5, Math.round(safeEndSec * 2) / 2);
+    const bucketKey = `${bucketStart}|${bucketEnd}`;
+    const existing = clusters.get(bucketKey);
+    if (!existing) {
+      clusters.set(bucketKey, {
+        startSec: bucketStart,
+        endSec: Math.max(bucketStart + 0.2, Math.min(durationSec, bucketEnd)),
+        startLabel: finding.timestampLabel ?? formatTimeLabel(startSec),
+        endLabel: readTimestampEndLabel(finding) ?? formatTimeLabel(safeEndSec),
+        issueTypes: [...finding.issueTypes],
+        count: 1,
+      });
+      continue;
+    }
+
+    existing.count += 1;
+    for (const issue of finding.issueTypes) {
+      if (!existing.issueTypes.includes(issue)) {
+        existing.issueTypes.push(issue);
+      }
+    }
+    if (!existing.startLabel && finding.timestampLabel) {
+      existing.startLabel = finding.timestampLabel;
+    }
+  }
+
+  return [...clusters.values()].sort((left, right) => {
+    if (left.startSec !== right.startSec) return left.startSec - right.startSec;
+    return left.endSec - right.endSec;
+  });
 }
 
 function createButton(label: string, className: string, onClick: () => void): HTMLButtonElement {
@@ -417,6 +554,28 @@ function installStyles() {
       padding: 8px;
       font-size: 11px;
     }
+    .ytp-progress-bar-container[${TIMELINE_MARKER_HOST_ATTR}="true"] {
+      position: relative;
+    }
+    .${TIMELINE_MARKER_LAYER_CLASS} {
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      z-index: 9999;
+    }
+    .${TIMELINE_MARKER_CLASS} {
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      min-width: 2px;
+      border-radius: 999px;
+      background: var(--cred-marker-color, #1a73e8);
+      box-shadow:
+        0 0 0 1px rgba(0, 0, 0, 0.24),
+        0 0 6px rgba(0, 0, 0, 0.18);
+      opacity: 1;
+      z-index: 10000;
+    }
     @keyframes cred-spin {
       from { transform: rotate(0deg); }
       to { transform: rotate(360deg); }
@@ -483,6 +642,8 @@ export default defineContentScript({
     let transcriptVersion = 0;
     let activeTranscriptSegmentId: string | null = null;
     let watchedVideo: HTMLVideoElement | null = null;
+    let timelineMarkerHost: HTMLElement | null = null;
+    let timelineMarkerFingerprint = '';
 
     const getCurrentVideoId = (): string | null => getVideoIdFromUrl(location.href);
 
@@ -548,8 +709,113 @@ export default defineContentScript({
       }
     };
 
+    const clearIssueTimelineMarkers = () => {
+      if (!timelineMarkerHost && timelineMarkerFingerprint === '') {
+        return;
+      }
+      if (timelineMarkerHost) {
+        timelineMarkerHost
+          .querySelector<HTMLElement>(`.${TIMELINE_MARKER_LAYER_CLASS}`)
+          ?.remove();
+        timelineMarkerHost.removeAttribute(TIMELINE_MARKER_HOST_ATTR);
+      } else {
+        const looseLayers = document.querySelectorAll<HTMLElement>(`.${TIMELINE_MARKER_LAYER_CLASS}`);
+        for (const layer of looseLayers) {
+          layer.remove();
+        }
+        const markedHosts = document.querySelectorAll<HTMLElement>(
+          `.ytp-progress-bar-container[${TIMELINE_MARKER_HOST_ATTR}="true"]`,
+        );
+        for (const host of markedHosts) {
+          host.removeAttribute(TIMELINE_MARKER_HOST_ATTR);
+        }
+      }
+      timelineMarkerHost = null;
+      timelineMarkerFingerprint = '';
+    };
+
+    const updateIssueTimelineMarkers = () => {
+      if (!isWatchUrl(location.href)) {
+        clearIssueTimelineMarkers();
+        return;
+      }
+
+      const findings = report?.findings ?? [];
+      const video = document.querySelector<HTMLVideoElement>('video');
+      const duration = video?.duration ?? Number.NaN;
+      const segments = getDisplayTranscriptSegments();
+      const markers =
+        Number.isFinite(duration) && duration > 0
+          ? collectTimelineIssueMarkers(findings, segments, duration)
+          : [];
+
+      if (!video || !Number.isFinite(duration) || duration <= 0 || markers.length === 0) {
+        clearIssueTimelineMarkers();
+        return;
+      }
+
+      const player = video.closest<HTMLElement>('.html5-video-player');
+      const nextHost = player?.querySelector<HTMLElement>('.ytp-progress-bar-container') ?? null;
+      if (!nextHost) {
+        clearIssueTimelineMarkers();
+        return;
+      }
+
+      const markerFingerprint = [
+        getCurrentVideoId() ?? '',
+        duration.toFixed(3),
+        ...markers.map(
+          (marker) =>
+            `${marker.startSec.toFixed(3)}-${marker.endSec.toFixed(3)}:${marker.issueTypes.slice().sort().join('+')}:${marker.count}`,
+        ),
+      ].join('|');
+
+      if (timelineMarkerHost === nextHost && timelineMarkerFingerprint === markerFingerprint) {
+        return;
+      }
+
+      if (timelineMarkerHost && timelineMarkerHost !== nextHost) {
+        timelineMarkerHost
+          .querySelector<HTMLElement>(`.${TIMELINE_MARKER_LAYER_CLASS}`)
+          ?.remove();
+        timelineMarkerHost.removeAttribute(TIMELINE_MARKER_HOST_ATTR);
+      }
+
+      let layer = nextHost.querySelector<HTMLElement>(`.${TIMELINE_MARKER_LAYER_CLASS}`);
+      if (!layer) {
+        layer = document.createElement('div');
+        layer.className = TIMELINE_MARKER_LAYER_CLASS;
+      }
+      nextHost.appendChild(layer);
+      nextHost.setAttribute(TIMELINE_MARKER_HOST_ATTR, 'true');
+
+      layer.innerHTML = '';
+      for (const marker of markers) {
+        const markerNode = document.createElement('span');
+        markerNode.className = TIMELINE_MARKER_CLASS;
+        markerNode.setAttribute('data-testid', TIMELINE_MARKER_TEST_ID);
+        markerNode.dataset.issueTypes = marker.issueTypes.join(' ');
+        const startPercent = Math.max(0, Math.min(100, (marker.startSec / duration) * 100));
+        const endPercent = Math.max(0, Math.min(100, (marker.endSec / duration) * 100));
+        const widthPercent = Math.max(0.25, endPercent - startPercent);
+        markerNode.dataset.startSec = marker.startSec.toFixed(3);
+        markerNode.dataset.endSec = marker.endSec.toFixed(3);
+        markerNode.style.left = `${startPercent}%`;
+        markerNode.style.width = `${widthPercent}%`;
+        markerNode.style.setProperty('--cred-marker-color', timelineMarkerColor(marker.issueTypes));
+        markerNode.title = `${marker.startLabel} - ${marker.endLabel} • ${marker.issueTypes
+          .map(issueLabel)
+          .join(', ')}`;
+        layer.appendChild(markerNode);
+      }
+
+      timelineMarkerHost = nextHost;
+      timelineMarkerFingerprint = markerFingerprint;
+    };
+
     const onVideoTimelineUpdate = () => {
       updateCurrentTranscriptHighlight();
+      updateIssueTimelineMarkers();
     };
 
     const syncVideoListener = () => {
@@ -559,12 +825,16 @@ export default defineContentScript({
         watchedVideo.removeEventListener('timeupdate', onVideoTimelineUpdate);
         watchedVideo.removeEventListener('seeking', onVideoTimelineUpdate);
         watchedVideo.removeEventListener('seeked', onVideoTimelineUpdate);
+        watchedVideo.removeEventListener('loadedmetadata', onVideoTimelineUpdate);
+        watchedVideo.removeEventListener('durationchange', onVideoTimelineUpdate);
       }
       watchedVideo = video;
       if (watchedVideo) {
         watchedVideo.addEventListener('timeupdate', onVideoTimelineUpdate);
         watchedVideo.addEventListener('seeking', onVideoTimelineUpdate);
         watchedVideo.addEventListener('seeked', onVideoTimelineUpdate);
+        watchedVideo.addEventListener('loadedmetadata', onVideoTimelineUpdate);
+        watchedVideo.addEventListener('durationchange', onVideoTimelineUpdate);
       }
     };
 
@@ -572,6 +842,7 @@ export default defineContentScript({
       if (!isWatchUrl(location.href)) {
         panelRoot?.remove();
         panelRoot = null;
+        clearIssueTimelineMarkers();
         return;
       }
       const host = findPanelHost();
@@ -873,6 +1144,7 @@ export default defineContentScript({
       transcriptWrap.scrollTop = previousTranscriptScrollTop;
       panelRoot.appendChild(body);
       updateCurrentTranscriptHighlight();
+      updateIssueTimelineMarkers();
     };
 
     const loadEmbeddedState = async () => {
@@ -1005,8 +1277,11 @@ export default defineContentScript({
             watchedVideo.removeEventListener('timeupdate', onVideoTimelineUpdate);
             watchedVideo.removeEventListener('seeking', onVideoTimelineUpdate);
             watchedVideo.removeEventListener('seeked', onVideoTimelineUpdate);
+            watchedVideo.removeEventListener('loadedmetadata', onVideoTimelineUpdate);
+            watchedVideo.removeEventListener('durationchange', onVideoTimelineUpdate);
             watchedVideo = null;
           }
+          clearIssueTimelineMarkers();
           panelRoot?.remove();
           panelRoot = null;
           return;
@@ -1040,6 +1315,7 @@ export default defineContentScript({
           void loadTranscript();
         }
         updateCurrentTranscriptHighlight();
+        updateIssueTimelineMarkers();
       }
     }, URL_CHECK_INTERVAL_MS);
   },
