@@ -968,7 +968,7 @@ function App() {
           ]),
           sendMessage<SettingsResponse>({ type: 'GET_SETTINGS' }).catch(() => undefined),
           forcedTabId == null
-            ? ext.tabs.query({ active: true, currentWindow: true })
+            ? ext.tabs.query({ active: true, lastFocusedWindow: true })
             : Promise.resolve([] as any[]),
         ]);
 
@@ -1158,7 +1158,6 @@ function App() {
         tabId: activeTabId,
         findingId,
       });
-      window.close();
     },
     [activeTabId],
   );
