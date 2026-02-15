@@ -3,6 +3,7 @@ import type {
   CandidateClaim,
   Finding,
   IssueType,
+  PageContext,
   RawFinding,
   ScanReport,
   ScanSummary,
@@ -15,6 +16,7 @@ const ARGUMENT_THRESHOLD = 0.5;
 const YOUTUBE_MISINFORMATION_THRESHOLD = 0.45;
 const YOUTUBE_ARGUMENT_THRESHOLD = 0.35;
 const MAX_TRANSCRIPT_PROMPT_SEGMENTS = 520;
+const MAX_CONTEXT_CHARS = 16_000;
 
 const FALLACY_SUBTYPES = new Set([
   'straw man',
@@ -288,6 +290,154 @@ function buildDirectFindingsPrompt(options: {
           'PAGE_TEXT_END',
         ]),
   ].join('\n');
+}
+
+function buildContextPrompt(options: {
+  url: string;
+  title: string;
+  content: string;
+  transcriptSegments?: TranscriptSegment[];
+}): string {
+  const { url, title, content, transcriptSegments } = options;
+  const isYouTube = (transcriptSegments?.length ?? 0) > 0;
+
+  return [
+    'You are an article context distiller for fact-check retrieval.',
+    'Extract the main topic context, not rhetorical style details.',
+    'Return strict JSON only with shape:',
+    '{"summary":"string","topicKeywords":["string"],"entityKeywords":["string"]}',
+    'Rules:',
+    '- summary must be one concise sentence (<= 220 chars).',
+    '- topicKeywords: 4 to 8 short terms describing what the page is substantively about.',
+    '- entityKeywords: 0 to 5 proper names directly central to the topic.',
+    '- Avoid generic terms like people/today/article/podcast.',
+    `URL: ${url}`,
+    `TITLE: ${title}`,
+    ...(isYouTube
+      ? [
+          'TRANSCRIPT_LINES_START',
+          buildTranscriptContext(transcriptSegments ?? []),
+          'TRANSCRIPT_LINES_END',
+        ]
+      : [
+          'PAGE_TEXT_START',
+          content,
+          'PAGE_TEXT_END',
+        ]),
+  ].join('\n');
+}
+
+function extractTopicKeywordsFallback(text: string): string[] {
+  const stopWords = new Set([
+    'a',
+    'an',
+    'the',
+    'and',
+    'or',
+    'if',
+    'but',
+    'to',
+    'of',
+    'in',
+    'for',
+    'on',
+    'with',
+    'at',
+    'by',
+    'from',
+    'as',
+    'that',
+    'this',
+    'these',
+    'those',
+    'is',
+    'are',
+    'was',
+    'were',
+    'be',
+    'been',
+    'being',
+    'it',
+    'its',
+    'they',
+    'them',
+    'their',
+    'you',
+    'your',
+    'we',
+    'our',
+    'said',
+    'says',
+    'reported',
+    'podcast',
+    'article',
+  ]);
+
+  const counts = new Map<string, number>();
+  const words = text
+    .toLowerCase()
+    .replace(/[^\w\s-]/g, ' ')
+    .split(/\s+/)
+    .filter((word) => word.length > 3 && !stopWords.has(word));
+
+  for (const word of words) {
+    counts.set(word, (counts.get(word) ?? 0) + 1);
+  }
+
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 8)
+    .map(([word]) => word);
+}
+
+function extractEntityKeywordsFallback(text: string): string[] {
+  const matches = text.match(/\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2}\b/g) ?? [];
+  const banned = new Set(['The', 'This', 'That', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday']);
+  const filtered = matches
+    .map((name) => name.trim())
+    .filter((name) => name.length >= 3 && !banned.has(name));
+  return Array.from(new Set(filtered)).slice(0, 5);
+}
+
+function fallbackPageContext(title: string, text: string): PageContext {
+  const summarySource = text.replace(/\s+/g, ' ').trim();
+  const shortSummary = summarySource
+    ? summarySource.slice(0, 220).replace(/\s+\S*$/, '').trim()
+    : title;
+  return {
+    summary: shortSummary || title,
+    topicKeywords: extractTopicKeywordsFallback(`${title} ${text}`),
+    entityKeywords: extractEntityKeywordsFallback(`${title} ${text}`),
+  };
+}
+
+function coerceStringList(value: unknown, maxItems: number): string[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => String(item ?? '').trim())
+    .filter((item) => item.length >= 2)
+    .slice(0, maxItems);
+}
+
+function coercePageContext(payload: unknown, fallback: PageContext): PageContext {
+  if (!payload || typeof payload !== 'object') {
+    return fallback;
+  }
+  const summary = String((payload as { summary?: unknown }).summary ?? '').trim();
+  const topicKeywords = coerceStringList(
+    (payload as { topicKeywords?: unknown }).topicKeywords,
+    8,
+  );
+  const entityKeywords = coerceStringList(
+    (payload as { entityKeywords?: unknown }).entityKeywords,
+    5,
+  );
+
+  return {
+    summary: summary || fallback.summary,
+    topicKeywords: topicKeywords.length > 0 ? topicKeywords : fallback.topicKeywords,
+    entityKeywords: entityKeywords.length > 0 ? entityKeywords : fallback.entityKeywords,
+  };
 }
 
 function coerceCandidates(payload: unknown): CandidateClaim[] {
@@ -596,6 +746,28 @@ export async function analyzeClaims(options: {
   } = options;
   const normalizedPageText = normalizeText(text);
   const isYouTube = transcriptSegments.length > 0;
+  const contextText = text.slice(0, MAX_CONTEXT_CHARS);
+  const contextFallback = fallbackPageContext(title, contextText);
+  const contextPrompt = buildContextPrompt({
+    url,
+    title,
+    content: contextText,
+    transcriptSegments,
+  });
+  const pageContextRaw = await callOpenRouterJsonSafe<{
+    summary?: unknown;
+    topicKeywords?: unknown;
+    entityKeywords?: unknown;
+  }>({
+    apiKey,
+    prompt: contextPrompt,
+    fallback: {
+      summary: contextFallback.summary,
+      topicKeywords: contextFallback.topicKeywords,
+      entityKeywords: contextFallback.entityKeywords,
+    },
+  });
+  const pageContext = coercePageContext(pageContextRaw, contextFallback);
 
   const candidatePrompt = buildCandidatePrompt({
     url,
@@ -638,6 +810,7 @@ export async function analyzeClaims(options: {
       tabId,
       url,
       title,
+      pageContext,
       scannedAt: new Date().toISOString(),
       summary: buildSummary(findings),
       findings,
@@ -674,6 +847,7 @@ export async function analyzeClaims(options: {
     tabId,
     url,
     title,
+    pageContext,
     scannedAt: new Date().toISOString(),
     summary: buildSummary(findings),
     findings,

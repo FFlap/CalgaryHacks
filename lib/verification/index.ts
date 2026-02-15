@@ -1,4 +1,4 @@
-import type { Finding, FindingEvidence } from '@/lib/types';
+import type { Finding, FindingEvidence, ScanReport } from '@/lib/types';
 
 import { classifyVerificationStatus } from '@/lib/verification/classify';
 import {
@@ -7,25 +7,10 @@ import {
 } from '@/lib/verification/googleFactCheck';
 import { searchGdeltArticles } from '@/lib/verification/gdelt';
 import { searchPubMed } from '@/lib/verification/pubmed';
-import { buildFindingQuery, extractSearchKeywords } from '@/lib/verification/query';
+import { buildEvidenceQueryPack } from '@/lib/verification/query';
+import { rerankEvidenceWithOpenRouter } from '@/lib/verification/relevance';
 import { searchWikidata } from '@/lib/verification/wikidata';
 import { searchWikipedia } from '@/lib/verification/wikipedia';
-
-function buildQueryVariants(input: {
-  base: string;
-  quote: string;
-  correction?: string;
-}): string[] {
-  const variants = [
-    input.base,
-    extractSearchKeywords(input.quote),
-    input.correction ? extractSearchKeywords(input.correction) : '',
-  ]
-    .map((value) => value.trim())
-    .filter((value) => value.length >= 4);
-
-  return Array.from(new Set(variants)).slice(0, 3);
-}
 
 async function firstNonEmpty<T>(
   queries: string[],
@@ -57,23 +42,27 @@ async function searchFactChecksWithFallback(
 
 export async function buildFindingEvidence(input: {
   tabId: number;
-  finding: Pick<Finding, 'id' | 'quote' | 'correction'>;
+  finding: Pick<Finding, 'id' | 'quote' | 'correction' | 'rationale' | 'issueTypes'>;
+  pageContext?: ScanReport['pageContext'];
   googleFactCheckApiKey?: string | null;
+  openRouterApiKey?: string | null;
 }): Promise<FindingEvidence> {
-  const query = buildFindingQuery(input.finding);
-  const queries = buildQueryVariants({
-    base: query,
-    quote: input.finding.quote,
-    correction: input.finding.correction,
-  });
+  const queryPack = buildEvidenceQueryPack(input.finding, input.pageContext);
+  const query = queryPack.primary;
 
   const [factChecksResult, wikipediaResult, wikidataResult, pubmedResult, gdeltResult] =
     await Promise.allSettled([
-      searchFactChecksWithFallback(queries, input.googleFactCheckApiKey),
-      firstNonEmpty(queries, searchWikipedia),
-      firstNonEmpty(queries, searchWikidata),
-      firstNonEmpty(queries, searchPubMed),
-      firstNonEmpty(queries, searchGdeltArticles),
+      searchFactChecksWithFallback(queryPack.factCheckQueries, input.googleFactCheckApiKey),
+      firstNonEmpty(queryPack.wikipediaQueries, (candidate) =>
+        searchWikipedia(candidate, {
+          topicTerms: queryPack.topicTerms,
+          entityTerms: queryPack.entityTerms,
+          intent: queryPack.intent,
+        }),
+      ),
+      firstNonEmpty(queryPack.wikidataQueries, searchWikidata),
+      firstNonEmpty(queryPack.pubmedQueries, searchPubMed),
+      firstNonEmpty(queryPack.gdeltQueries, searchGdeltArticles),
     ]);
 
   const factChecksPayload =
@@ -81,17 +70,14 @@ export async function buildFindingEvidence(input: {
       ? factChecksResult.value
       : { configured: hasGoogleFactCheckApiKey(input.googleFactCheckApiKey), matches: [] };
 
-  const corroboration = {
+  let corroboration = {
     wikipedia: wikipediaResult.status === 'fulfilled' ? wikipediaResult.value : [],
     wikidata: wikidataResult.status === 'fulfilled' ? wikidataResult.value : [],
     pubmed: pubmedResult.status === 'fulfilled' ? pubmedResult.value : [],
   };
 
-  const gdeltArticles = gdeltResult.status === 'fulfilled' ? gdeltResult.value : [];
-  const status = classifyVerificationStatus({
-    factChecks: factChecksPayload.matches,
-    corroboration,
-  });
+  let factChecks = factChecksPayload.matches;
+  let gdeltArticles = gdeltResult.status === 'fulfilled' ? gdeltResult.value : [];
 
   const errors: FindingEvidence['errors'] = {};
   if (factChecksResult.status === 'rejected') {
@@ -114,7 +100,32 @@ export async function buildFindingEvidence(input: {
       ? pubmedResult.reason.message
       : 'PubMed lookup failed.';
   }
+
+  const rerankKey = typeof input.openRouterApiKey === 'string' ? input.openRouterApiKey.trim() : '';
+  if (rerankKey) {
+    try {
+      const reranked = await rerankEvidenceWithOpenRouter({
+        apiKey: rerankKey,
+        finding: input.finding,
+        pageContext: input.pageContext,
+        evidence: {
+          factChecks,
+          corroboration,
+          gdeltArticles,
+        },
+      });
+      factChecks = reranked.factChecks;
+      corroboration = reranked.corroboration;
+      gdeltArticles = reranked.gdeltArticles;
+    } catch (error) {
+      errors.openrouter = error instanceof Error ? error.message : 'OpenRouter evidence filtering failed.';
+    }
+  }
   // GDELT failures are treated as non-blocking and surfaced as empty results.
+  const status = classifyVerificationStatus({
+    factChecks,
+    corroboration,
+  });
 
   return {
     tabId: input.tabId,
@@ -123,7 +134,7 @@ export async function buildFindingEvidence(input: {
     query,
     generatedAt: new Date().toISOString(),
     status,
-    factChecks: factChecksPayload.matches,
+    factChecks,
     corroboration,
     gdeltArticles,
     apiStatus: {

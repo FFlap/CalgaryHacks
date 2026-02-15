@@ -389,35 +389,215 @@ function seekVideoToTimestampInPage(timestampSec: number) {
 }
 
 function extractVisibleTextInPage(): ExtractionResult {
-  const blockedTags = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'TEXTAREA']);
-  const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
-    acceptNode(node) {
-      const parent = node.parentElement;
-      if (!parent) return NodeFilter.FILTER_REJECT;
-      if (blockedTags.has(parent.tagName)) return NodeFilter.FILTER_REJECT;
-      const style = window.getComputedStyle(parent);
-      if (style.display === 'none' || style.visibility === 'hidden') {
-        return NodeFilter.FILTER_REJECT;
-      }
-      const normalized = (node.textContent ?? '').replace(/\s+/g, ' ').trim();
-      if (normalized.length < 20) {
-        return NodeFilter.FILTER_REJECT;
-      }
-      return NodeFilter.FILTER_ACCEPT;
-    },
-  });
+  const blockedTags = new Set([
+    'SCRIPT',
+    'STYLE',
+    'NOSCRIPT',
+    'TEXTAREA',
+    'SVG',
+    'CANVAS',
+    'IFRAME',
+  ]);
+  const blockedContainers = new Set(['NAV', 'FOOTER', 'ASIDE', 'FORM']);
+  const containerNoisePattern =
+    /\b(ad|ads|advert|sponsor|promo|outbrain|taboola|recirc|related|recommend|newsletter|subscribe|cookie|consent|banner|sidebar|comments?|footer|header|nav|menu)\b/i;
+  const lineNoisePattern =
+    /^(advertisement|sponsored|related|recommended|read more|sign up|subscribe|cookie settings|privacy policy|terms of use|terms of service)$/i;
+  const minBlockLength = 20;
 
-  const blocks: string[] = [];
-  let node: Node | null = walker.nextNode();
-  while (node) {
-    const text = (node.textContent ?? '').replace(/\s+/g, ' ').trim();
-    if (text.length >= 20) {
-      blocks.push(text);
+  const markerCache = new WeakMap<Element, boolean>();
+  const linkDensityCache = new WeakMap<Element, boolean>();
+
+  const normalizeText = (value: string): string => value.replace(/\s+/g, ' ').trim();
+
+  const isVisible = (element: Element | null): boolean => {
+    if (!element) return false;
+    if ((element as HTMLElement).hidden) return false;
+    if (element.getAttribute('aria-hidden') === 'true') return false;
+    const style = window.getComputedStyle(element);
+    if (style.display === 'none' || style.visibility === 'hidden') return false;
+    return true;
+  };
+
+  const hasNoiseMarker = (element: Element): boolean => {
+    const cached = markerCache.get(element);
+    if (typeof cached === 'boolean') {
+      return cached;
     }
-    node = walker.nextNode();
+
+    const markerText = [
+      element.id,
+      typeof element.className === 'string' ? element.className : '',
+      element.getAttribute('role') ?? '',
+      element.getAttribute('aria-label') ?? '',
+      element.getAttribute('data-testid') ?? '',
+      element.getAttribute('data-component') ?? '',
+      element.getAttribute('data-module') ?? '',
+    ]
+      .join(' ')
+      .toLowerCase();
+
+    const flagged =
+      blockedContainers.has(element.tagName) ||
+      markerText.includes('sponsored') ||
+      markerText.includes('advertisement') ||
+      containerNoisePattern.test(markerText);
+
+    markerCache.set(element, flagged);
+    return flagged;
+  };
+
+  const isLinkDense = (container: Element): boolean => {
+    const cached = linkDensityCache.get(container);
+    if (typeof cached === 'boolean') {
+      return cached;
+    }
+
+    const totalText = normalizeText(container.textContent ?? '');
+    if (totalText.length < 120) {
+      linkDensityCache.set(container, false);
+      return false;
+    }
+
+    const linkText = normalizeText(
+      Array.from(container.querySelectorAll('a'))
+        .map((anchor) => anchor.textContent ?? '')
+        .join(' '),
+    );
+
+    const dense = linkText.length / Math.max(1, totalText.length) > 0.62;
+    linkDensityCache.set(container, dense);
+    return dense;
+  };
+
+  const shouldSkipNode = (node: Node): boolean => {
+    const parent = (node as Text).parentElement;
+    if (!parent) return true;
+    if (blockedTags.has(parent.tagName)) return true;
+    if (!isVisible(parent)) return true;
+
+    let cursor: Element | null = parent;
+    for (let depth = 0; cursor && depth < 7; depth += 1) {
+      if (blockedTags.has(cursor.tagName)) return true;
+      if (!isVisible(cursor)) return true;
+      if (hasNoiseMarker(cursor)) return true;
+      cursor = cursor.parentElement;
+    }
+
+    const normalized = normalizeText(node.textContent ?? '');
+    if (normalized.length < minBlockLength) return true;
+    if (normalized.length < 120 && lineNoisePattern.test(normalized.toLowerCase())) return true;
+
+    const container =
+      parent.closest('article,section,div,p,li,main') ??
+      parent;
+    if (isLinkDense(container)) return true;
+
+    return false;
+  };
+
+  const collectBlocks = (root: Element, maxBlocks = 1200): string[] => {
+    const seen = new Set<string>();
+    const blocks: string[] = [];
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+      acceptNode(node) {
+        return shouldSkipNode(node)
+          ? NodeFilter.FILTER_REJECT
+          : NodeFilter.FILTER_ACCEPT;
+      },
+    });
+
+    let node: Node | null = walker.nextNode();
+    while (node) {
+      const text = normalizeText(node.textContent ?? '');
+      const normalizedKey = text.toLowerCase();
+      if (!seen.has(normalizedKey)) {
+        blocks.push(text);
+        seen.add(normalizedKey);
+      }
+      if (blocks.length >= maxBlocks) {
+        break;
+      }
+      node = walker.nextNode();
+    }
+
+    return blocks;
+  };
+
+  const scoreBlocks = (blocks: string[]): number => {
+    if (blocks.length === 0) return 0;
+    const joined = blocks.join(' ');
+    const charCount = joined.length;
+    const punctuationCount = (joined.match(/[.!?]/g) ?? []).length;
+    return charCount + punctuationCount * 12 + blocks.length * 18;
+  };
+
+  const collectRootCandidates = (): Element[] => {
+    const selectors = [
+      '[itemprop="articleBody"]',
+      'main article',
+      '[role="main"] article',
+      'article',
+      '.article-body',
+      '.article-content',
+      '.story-body',
+      '.post-content',
+      '.entry-content',
+      'main',
+      '[role="main"]',
+      '#main-content',
+      '#content',
+      '.main-content',
+    ];
+
+    const seen = new Set<Element>();
+    const candidates: Element[] = [];
+
+    const addCandidate = (element: Element | null) => {
+      if (!element) return;
+      if (!isVisible(element)) return;
+      if (seen.has(element)) return;
+      if (hasNoiseMarker(element)) return;
+      seen.add(element);
+      candidates.push(element);
+    };
+
+    for (const selector of selectors) {
+      const rows = document.querySelectorAll(selector);
+      for (const element of rows) {
+        addCandidate(element as Element);
+      }
+    }
+
+    addCandidate(document.querySelector('body'));
+    return candidates;
+  };
+
+  const candidates = collectRootCandidates();
+  let chosenRoot: Element = document.body;
+  let chosenBlocks: string[] = [];
+  let bestScore = 0;
+
+  for (const candidate of candidates) {
+    const blocks = collectBlocks(candidate, 320);
+    const score = scoreBlocks(blocks);
+    if (score > bestScore) {
+      bestScore = score;
+      chosenRoot = candidate;
+      chosenBlocks = blocks;
+    }
   }
 
-  const text = blocks.join('\n');
+  let finalBlocks = collectBlocks(chosenRoot, 1600);
+  const finalChars = finalBlocks.join('\n').length;
+
+  if (finalChars < 650 && chosenRoot !== document.body) {
+    finalBlocks = collectBlocks(document.body, 1600);
+  } else if (finalBlocks.length === 0 && chosenBlocks.length > 0) {
+    finalBlocks = chosenBlocks;
+  }
+
+  const text = finalBlocks.join('\n');
   return {
     url: location.href,
     title: document.title,
@@ -554,7 +734,7 @@ async function fetchTranscriptByVideoId(
         transcriptFetch: transcriptFetchHook,
       });
       const segments = normalizeTranscriptSegments(
-        rawSegments.map((segment) => ({
+        rawSegments.map((segment: { offset: number | string; text: string }) => ({
           startSec: Number(segment.offset),
           startLabel: formatTimeLabel(Number(segment.offset)),
           text: segment.text,
@@ -809,8 +989,12 @@ async function resolveFindingEvidence(options: {
       id: finding.id,
       quote: finding.quote,
       correction: finding.correction,
+      rationale: finding.rationale,
+      issueTypes: finding.issueTypes,
     },
+    pageContext: report.pageContext,
     googleFactCheckApiKey: await getGoogleFactCheckApiKey(),
+    openRouterApiKey: await getApiKey(),
   })
     .then(async (evidence) => {
       await saveFindingEvidence(tabId, findingId, evidence);
