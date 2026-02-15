@@ -17,6 +17,8 @@
     "test:e2e": "npm run build:e2e-ext && playwright test",
     "test:e2e:focus": "npm run build:e2e-ext && playwright test tests/e2e/highlight-focus.spec.ts",
     "test:e2e:foxnews": "npm run build:e2e-ext && playwright test tests/e2e/foxnews.spec.ts",
+    "test:e2e:youtube": "npm run build:e2e-ext && playwright test tests/e2e/youtube-embedded.spec.ts tests/e2e/youtube-get-transcript.spec.ts",
+    "test:e2e:youtube-live": "npm run build:e2e-ext && playwright test tests/e2e/youtube-live.spec.ts",
     "playwright:install": "playwright install chromium",
     "postinstall": "wxt prepare"
   },
@@ -28,7 +30,8 @@
     "lucide-react": "^0.564.0",
     "react": "^19.2.4",
     "react-dom": "^19.2.4",
-    "tailwind-merge": "^3.4.0"
+    "tailwind-merge": "^3.4.0",
+    "youtube-transcript-plus": "^1.2.0"
   },
   "devDependencies": {
     "@playwright/test": "^1.55.0",

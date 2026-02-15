@@ -1,6 +1,18 @@
 import { analyzeClaims } from '@/lib/analysis';
 import { getApiKey, getReport, hasApiKey, saveApiKey, saveReport } from '@/lib/storage';
-import type { ExtractionResult, Finding, RuntimeRequest, ScanReport, ScanState, ScanStatus } from '@/lib/types';
+import type {
+  EmbeddedPanelUpdate,
+  ExtractionResult,
+  Finding,
+  RuntimeRequest,
+  ScanReport,
+  ScanState,
+  ScanStatus,
+  TranscriptSegment,
+  YouTubeTranscriptExtractionResult,
+} from '@/lib/types';
+import { fetchTranscript } from 'youtube-transcript-plus';
+import { formatTimeLabel, normalizeTranscriptSegments, validateTranscriptSegments } from '@/lib/youtube-transcript';
 
 const MAX_ANALYSIS_CHARS = 60_000;
 
@@ -11,6 +23,47 @@ const reportByTab = new Map<number, ScanReport>();
 const focusedFindingByTab = new Map<number, string>();
 const inFlightScans = new Map<number, Promise<void>>();
 
+function parseYouTubeVideoId(url: string): string | undefined {
+  try {
+    const parsed = new URL(url);
+    const hostname = parsed.hostname.toLowerCase();
+    const allowedHosts = new Set([
+      'www.youtube.com',
+      'youtube.com',
+      'm.youtube.com',
+      'music.youtube.com',
+    ]);
+    if (!allowedHosts.has(hostname)) return undefined;
+    return parsed.searchParams.get('v') ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function isYouTubeWatchUrl(url: string): boolean {
+  return parseYouTubeVideoId(url) !== undefined;
+}
+
+async function getReportForTab(tabId: number): Promise<ScanReport | null> {
+  return reportByTab.get(tabId) ?? (await getReport(tabId));
+}
+
+function notifyEmbeddedPanel(tabId: number) {
+  const status = statusByTab.get(tabId);
+  if (!status) return;
+
+  const payload: EmbeddedPanelUpdate = {
+    type: 'EMBEDDED_PANEL_UPDATE',
+    tabId,
+    status,
+    report: reportByTab.get(tabId) ?? null,
+  };
+
+  void Promise.resolve(ext.tabs.sendMessage(tabId, payload)).catch(() => {
+    // Ignore when no content script is attached.
+  });
+}
+
 function setStatus(tabId: number, state: ScanState, message: string, progress: number, errorCode?: string) {
   statusByTab.set(tabId, {
     tabId,
@@ -20,6 +73,7 @@ function setStatus(tabId: number, state: ScanState, message: string, progress: n
     updatedAt: Date.now(),
     errorCode,
   });
+  notifyEmbeddedPanel(tabId);
 }
 
 async function getActiveTabId(): Promise<number> {
@@ -240,13 +294,15 @@ function extractVisibleTextInPage(): ExtractionResult {
 
 async function executeOnTab<T>(
   tabId: number,
-  func: (...args: any[]) => T,
+  func: (...args: any[]) => T | Promise<T>,
   args: any[] = [],
+  world: 'ISOLATED' | 'MAIN' = 'ISOLATED',
 ): Promise<T> {
   const [result] = await ext.scripting.executeScript({
     target: { tabId },
     func,
     args,
+    world: world as any,
   });
 
   if (!result || typeof result.result === 'undefined') {
@@ -254,6 +310,140 @@ async function executeOnTab<T>(
   }
 
   return result.result as T;
+}
+
+async function fetchTranscriptByVideoId(
+  videoId: string,
+  tabId?: number,
+): Promise<YouTubeTranscriptExtractionResult> {
+  const preferredLang = (globalThis.navigator?.language ?? 'en').split('-')[0];
+  const languageAttempts = Array.from(new Set([preferredLang, 'en'])).filter(Boolean);
+
+  const runTabFetch = async (params: {
+    url: string;
+    method: 'GET' | 'POST';
+    body?: string;
+    headers?: Record<string, string>;
+    lang?: string;
+  }): Promise<Response> => {
+    if (!tabId) {
+      throw new Error('No YouTube tab context available for transcript fetch.');
+    }
+
+    const result = await executeOnTab<{
+      status: number;
+      statusText: string;
+      headers: Array<[string, string]>;
+      body: string;
+    }>(
+      tabId,
+      async (request) => {
+        const safeHeaders = new Headers(request.headers ?? {});
+        safeHeaders.delete('User-Agent');
+        if (request.lang && !safeHeaders.has('Accept-Language')) {
+          safeHeaders.set('Accept-Language', request.lang);
+        }
+        const response = await fetch(request.url, {
+          method: request.method ?? 'GET',
+          headers: safeHeaders,
+          body: request.method === 'POST' ? request.body : undefined,
+          credentials: 'include',
+          cache: 'no-store',
+        });
+        return {
+          status: response.status,
+          statusText: response.statusText,
+          headers: Array.from(response.headers.entries()),
+          body: await response.text(),
+        };
+      },
+      [params],
+      'MAIN',
+    );
+
+    return new Response(result.body, {
+      status: result.status,
+      statusText: result.statusText,
+      headers: result.headers,
+    });
+  };
+
+  const extensionFetch = async (params: {
+    url: string;
+    lang?: string;
+    userAgent?: string;
+    method?: 'GET' | 'POST';
+    body?: string;
+    headers?: Record<string, string>;
+  }): Promise<Response> => {
+    const safeHeaders = new Headers(params.headers ?? {});
+    safeHeaders.delete('User-Agent');
+    if (params.lang && !safeHeaders.has('Accept-Language')) {
+      safeHeaders.set('Accept-Language', params.lang);
+    }
+
+    return fetch(params.url, {
+      method: params.method ?? 'GET',
+      headers: safeHeaders,
+      body: params.method === 'POST' ? params.body : undefined,
+      credentials: 'include',
+      cache: 'no-store',
+    });
+  };
+
+  const transcriptFetchHook = async (params: {
+    url: string;
+    lang?: string;
+    userAgent?: string;
+    method?: 'GET' | 'POST';
+    body?: string;
+    headers?: Record<string, string>;
+  }): Promise<Response> => {
+    const normalized = {
+      ...params,
+      method: params.method ?? 'GET',
+    };
+    if (tabId) {
+      return runTabFetch(normalized);
+    }
+    return extensionFetch(normalized);
+  };
+
+  let lastError: string | undefined;
+  for (const lang of [...languageAttempts, undefined]) {
+    try {
+      const rawSegments = await fetchTranscript(videoId, {
+        ...(lang ? { lang } : {}),
+        videoFetch: transcriptFetchHook,
+        playerFetch: transcriptFetchHook,
+        transcriptFetch: transcriptFetchHook,
+      });
+      const segments = normalizeTranscriptSegments(
+        rawSegments.map((segment) => ({
+          startSec: Number(segment.offset),
+          startLabel: formatTimeLabel(Number(segment.offset)),
+          text: segment.text,
+        })),
+      );
+      const validation = validateTranscriptSegments(segments);
+      if (!validation.ok) {
+        lastError = `Transcript validation failed (${validation.reason ?? 'invalid_segments'}).`;
+        continue;
+      }
+      return {
+        ok: true,
+        source: 'youtube_api',
+        segments,
+      };
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : 'Unknown transcript error.';
+    }
+  }
+
+  return {
+    ok: false,
+    reason: lastError ?? 'Transcript unavailable for this video.',
+  };
 }
 
 async function runScan(tabId: number): Promise<void> {
@@ -271,36 +461,104 @@ async function runScan(tabId: number): Promise<void> {
       throw new Error('The page did not provide enough visible text to analyze.');
     }
 
-    const truncatedText = extraction.text.slice(0, MAX_ANALYSIS_CHARS);
-    const truncated = extraction.text.length > MAX_ANALYSIS_CHARS;
+    const youtubeMode = isYouTubeWatchUrl(extraction.url);
+    const videoId = parseYouTubeVideoId(extraction.url);
+    let transcriptSegments: TranscriptSegment[] = [];
+    let transcriptSource: 'youtube_api' | undefined;
+    let analysisText = extraction.text;
+
+    if (youtubeMode) {
+      setStatus(tabId, 'extracting', 'Collecting YouTube transcript...', 0.2);
+      if (!videoId) {
+        setStatus(tabId, 'error', 'Missing YouTube video id.', 1, 'invalid_video_id');
+        return;
+      }
+
+      const transcript = await fetchTranscriptByVideoId(videoId, tabId);
+      if (!transcript.ok || !transcript.segments || transcript.segments.length === 0) {
+        const report: ScanReport = {
+          tabId,
+          url: extraction.url,
+          title: extraction.title,
+          scanKind: 'youtube_video',
+          videoId,
+          transcript: {
+            source: 'youtube_api',
+            segments: [],
+            unavailableReason: transcript.reason ?? 'Transcript unavailable.',
+          },
+          scannedAt: new Date().toISOString(),
+          summary: {
+            totalFindings: 0,
+            misinformationCount: 0,
+            fallacyCount: 0,
+            biasCount: 0,
+          },
+          findings: [],
+          truncated: false,
+          analyzedChars: 0,
+        };
+        reportByTab.set(tabId, report);
+        await saveReport(tabId, report);
+        notifyEmbeddedPanel(tabId);
+        setStatus(
+          tabId,
+          'error',
+          transcript.reason ?? 'Transcript unavailable from youtube-transcript-plus.',
+          1,
+          'transcript_unavailable',
+        );
+        return;
+      }
+
+      transcriptSegments = transcript.segments;
+      transcriptSource = transcript.source;
+      analysisText = transcriptSegments.map((segment) => `[${segment.startLabel}] ${segment.text}`).join('\n');
+    }
+
+    const truncatedText = analysisText.slice(0, MAX_ANALYSIS_CHARS);
+    const truncated = analysisText.length > MAX_ANALYSIS_CHARS;
 
     setStatus(tabId, 'analyzing', 'Analyzing claims with OpenRouter Trinity...', 0.55);
-    const report = await analyzeClaims({
+    let report = await analyzeClaims({
       apiKey,
       tabId,
       url: extraction.url,
       title: extraction.title,
       text: truncatedText,
+      transcriptSegments,
       truncated,
       analyzedChars: truncatedText.length,
     });
 
-    setStatus(tabId, 'highlighting', 'Placing inline evidence highlights...', 0.82);
+    if (youtubeMode) {
+      report = {
+        ...report,
+        scanKind: 'youtube_video',
+        videoId,
+        transcript: {
+          source: transcriptSource ?? 'youtube_api',
+          segments: transcriptSegments,
+        },
+      };
+    } else {
+      setStatus(tabId, 'highlighting', 'Placing inline evidence highlights...', 0.82);
+      const highlightResult = await executeOnTab<{ appliedIds: string[]; appliedCount: number }>(
+        tabId,
+        applyHighlightsInPage,
+        [report.findings.map(({ id, quote, issueTypes, severity }) => ({ id, quote, issueTypes, severity }))],
+      );
 
-    const highlightResult = await executeOnTab<{ appliedIds: string[]; appliedCount: number }>(
-      tabId,
-      applyHighlightsInPage,
-      [report.findings.map(({ id, quote, issueTypes, severity }) => ({ id, quote, issueTypes, severity }))],
-    );
-
-    const appliedIdSet = new Set(highlightResult.appliedIds);
-    report.findings = report.findings.map((finding) => ({
-      ...finding,
-      highlightApplied: appliedIdSet.has(finding.id),
-    }));
+      const appliedIdSet = new Set(highlightResult.appliedIds);
+      report.findings = report.findings.map((finding) => ({
+        ...finding,
+        highlightApplied: appliedIdSet.has(finding.id),
+      }));
+    }
 
     reportByTab.set(tabId, report);
     await saveReport(tabId, report);
+    notifyEmbeddedPanel(tabId);
 
     const suffix = report.summary.totalFindings === 0 ? 'No high-confidence issues found.' : `${report.summary.totalFindings} high-confidence findings.`;
     setStatus(tabId, 'done', suffix, 1);
@@ -323,8 +581,9 @@ async function startScan(tabId: number) {
   inFlightScans.set(tabId, job);
 }
 
-async function resolveStatusTabId(preferred?: number): Promise<number | undefined> {
+async function resolveStatusTabId(preferred?: number, senderTabId?: number): Promise<number | undefined> {
   if (preferred) return preferred;
+  if (senderTabId) return senderTabId;
   try {
     return await getActiveTabId();
   } catch {
@@ -333,6 +592,13 @@ async function resolveStatusTabId(preferred?: number): Promise<number | undefine
 }
 
 export default defineBackground(() => {
+  ext.tabs.onRemoved.addListener((tabId) => {
+    statusByTab.delete(tabId);
+    reportByTab.delete(tabId);
+    focusedFindingByTab.delete(tabId);
+    inFlightScans.delete(tabId);
+  });
+
   ext.runtime.onMessage.addListener((message: RuntimeRequest, sender, sendResponse) => {
     void (async () => {
       switch (message.type) {
@@ -351,8 +617,40 @@ export default defineBackground(() => {
           return;
         }
 
-      case 'START_SCAN': {
-          const tabId = await resolveScannableTabId(message.tabId);
+        case 'GET_EMBEDDED_PANEL_STATE': {
+          const senderTabId = typeof sender.tab?.id === 'number' ? sender.tab.id : undefined;
+          const tabId = await resolveStatusTabId(undefined, senderTabId);
+          if (!tabId) {
+            sendResponse({
+              tabId: null,
+              status: { state: 'idle', progress: 0, message: 'No active tab.', updatedAt: Date.now() },
+              report: null,
+            });
+            return;
+          }
+
+          const status = statusByTab.get(tabId) ?? {
+            tabId,
+            state: 'idle',
+            progress: 0,
+            message: 'Idle.',
+            updatedAt: Date.now(),
+          };
+          const report = await getReportForTab(tabId);
+          if (report) {
+            reportByTab.set(tabId, report);
+          }
+          sendResponse({
+            tabId,
+            status,
+            report: report ?? null,
+          });
+          return;
+        }
+
+        case 'START_SCAN': {
+          const senderTabId = typeof sender.tab?.id === 'number' ? sender.tab.id : undefined;
+          const tabId = await resolveScannableTabId(message.tabId ?? senderTabId);
           setStatus(tabId, 'extracting', 'Preparing scan...', 0.05);
           void startScan(tabId);
           sendResponse({ ok: true, tabId });
@@ -360,7 +658,8 @@ export default defineBackground(() => {
         }
 
         case 'GET_SCAN_STATUS': {
-          const tabId = await resolveStatusTabId(message.tabId);
+          const senderTabId = typeof sender.tab?.id === 'number' ? sender.tab.id : undefined;
+          const tabId = await resolveStatusTabId(message.tabId, senderTabId);
           if (!tabId) {
             sendResponse({ state: 'idle', progress: 0, message: 'No active tab.' });
             return;
@@ -375,7 +674,10 @@ export default defineBackground(() => {
         }
 
         case 'GET_REPORT': {
-          const report = reportByTab.get(message.tabId) ?? (await getReport(message.tabId));
+          const report = await getReportForTab(message.tabId);
+          if (report) {
+            reportByTab.set(message.tabId, report);
+          }
           sendResponse({ report: report ?? null });
           return;
         }
@@ -425,6 +727,31 @@ export default defineBackground(() => {
             [message.findingId],
           );
           sendResponse({ ok: found });
+          return;
+        }
+
+        case 'GET_TRANSCRIPT': {
+          const senderTabId = typeof sender.tab?.id === 'number' ? sender.tab.id : undefined;
+          let targetTabId = message.tabId;
+          if (!targetTabId && senderTabId) {
+            try {
+              const senderTab = await ext.tabs.get(senderTabId);
+              if (typeof senderTab.url === 'string' && /^https?:\/\//i.test(senderTab.url)) {
+                targetTabId = senderTabId;
+              }
+            } catch {
+              // Ignore and fall back.
+            }
+          }
+          if (!targetTabId) {
+            try {
+              targetTabId = await resolveScannableTabId();
+            } catch {
+              targetTabId = undefined;
+            }
+          }
+          const result = await fetchTranscriptByVideoId(message.videoId, targetTabId);
+          sendResponse(result);
           return;
         }
 

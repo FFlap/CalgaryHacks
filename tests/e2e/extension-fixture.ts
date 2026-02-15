@@ -17,11 +17,27 @@ export interface Finding {
   severity: number;
   rationale: string;
   correction?: string;
+  timestampSec?: number;
+  timestampLabel?: string;
+}
+
+export interface TranscriptSegment {
+  id: string;
+  startSec: number;
+  startLabel: string;
+  text: string;
 }
 
 export interface ScanReport {
   url: string;
   title?: string;
+  scanKind?: 'webpage' | 'youtube_video';
+  videoId?: string;
+  transcript?: {
+    source: 'youtube_api';
+    segments: TranscriptSegment[];
+    unavailableReason?: string;
+  };
   findings: Finding[];
   summary?: {
     totalFindings?: number;
@@ -342,6 +358,12 @@ export function coerceReport(payload: unknown): ScanReport {
         typeof findingRaw.correction === 'string'
           ? findingRaw.correction
           : undefined,
+      timestampSec:
+        typeof findingRaw.timestampSec === 'number' ? findingRaw.timestampSec : undefined,
+      timestampLabel:
+        typeof findingRaw.timestampLabel === 'string'
+          ? findingRaw.timestampLabel
+          : undefined,
     };
 
     return finding;
@@ -352,9 +374,38 @@ export function coerceReport(payload: unknown): ScanReport {
       ? report.summary.totalFindings
       : undefined;
 
+  const transcript = isRecord(report.transcript)
+    ? {
+        source: 'youtube_api' as const,
+        unavailableReason:
+          typeof report.transcript.unavailableReason === 'string'
+            ? report.transcript.unavailableReason
+            : undefined,
+        segments: Array.isArray(report.transcript.segments)
+          ? report.transcript.segments
+              .filter(isRecord)
+              .map((segment, segIdx) => ({
+                id: asString(segment.id, `transcript.segments[${segIdx}].id`),
+                startSec: asNumber(segment.startSec, `transcript.segments[${segIdx}].startSec`),
+                startLabel: asString(
+                  segment.startLabel,
+                  `transcript.segments[${segIdx}].startLabel`,
+                ),
+                text: asString(segment.text, `transcript.segments[${segIdx}].text`),
+              }))
+          : [],
+      }
+    : undefined;
+
   return {
     url,
     title: typeof report.title === 'string' ? report.title : undefined,
+    scanKind:
+      report.scanKind === 'webpage' || report.scanKind === 'youtube_video'
+        ? report.scanKind
+        : undefined,
+    videoId: typeof report.videoId === 'string' ? report.videoId : undefined,
+    transcript,
     findings,
     summary: totalFindings == null ? undefined : { totalFindings },
   };

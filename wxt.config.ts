@@ -16,7 +16,13 @@ export default defineConfig({
   manifest: () => {
     const productionManifest = {
       permissions: ['activeTab', 'scripting', 'storage', 'tabs'],
-      host_permissions: ['https://openrouter.ai/*'],
+      host_permissions: [
+        'https://openrouter.ai/*',
+        'https://www.youtube.com/*',
+        'https://youtube.com/*',
+        'https://m.youtube.com/*',
+        'https://music.youtube.com/*',
+      ],
     };
 
     if (!isE2E) {

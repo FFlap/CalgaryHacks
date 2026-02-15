@@ -142,6 +142,29 @@ function stateLabel(state: ScanStatus['state']) {
   return 'Ready';
 }
 
+function sortFindingsForDisplay(findings: Finding[], timelineMode: boolean): Finding[] {
+  if (!timelineMode) return findings;
+
+  const withTimestamp = findings
+    .filter((finding) => Number.isFinite(finding.timestampSec))
+    .sort((left, right) => {
+      const leftSec = left.timestampSec as number;
+      const rightSec = right.timestampSec as number;
+      if (leftSec !== rightSec) return leftSec - rightSec;
+      if (left.severity !== right.severity) return right.severity - left.severity;
+      return right.confidence - left.confidence;
+    });
+
+  const withoutTimestamp = findings
+    .filter((finding) => !Number.isFinite(finding.timestampSec))
+    .sort((left, right) => {
+      if (left.severity !== right.severity) return right.severity - left.severity;
+      return right.confidence - left.confidence;
+    });
+
+  return [...withTimestamp, ...withoutTimestamp];
+}
+
 const scanStepOrder: Array<{ state: ScanStatus['state']; label: string }> = [
   { state: 'extracting', label: 'Extract page text' },
   { state: 'analyzing', label: 'Analyze claims' },
@@ -653,9 +676,9 @@ function App() {
 
   const filteredFindings = useMemo(() => {
     const findings = report?.findings ?? [];
-    if (filter === 'all') return findings;
-    return findings.filter((f) => f.issueTypes.includes(filter));
-  }, [report?.findings, filter]);
+    const filtered = filter === 'all' ? findings : findings.filter((f) => f.issueTypes.includes(filter));
+    return sortFindingsForDisplay(filtered, report?.scanKind === 'youtube_video');
+  }, [report?.findings, report?.scanKind, filter]);
 
   const isRunning = runningStates.has(scanStatus.state);
   const totalFindings = report?.summary.totalFindings ?? 0;
