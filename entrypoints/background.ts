@@ -724,7 +724,7 @@ async function fetchTranscriptByVideoId(
         transcriptFetch: transcriptFetchHook,
       });
       const segments = normalizeTranscriptSegments(
-        rawSegments.map((segment) => ({
+        rawSegments.map((segment: { offset: number | string; text: string }) => ({
           startSec: Number(segment.offset),
           startLabel: formatTimeLabel(Number(segment.offset)),
           text: segment.text,
