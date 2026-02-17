@@ -1,4 +1,4 @@
-# Clarify
+# Clarity
 
 # Inspiration
 
