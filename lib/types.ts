@@ -147,10 +147,14 @@ export interface YouTubeTranscriptExtractionResult {
   reason?: string;
 }
 
+export type RewriteLevel = 1 | 2 | 3;
+
 export type RuntimeRequest =
   | { type: 'SAVE_API_KEY'; apiKey: string }
   | { type: 'SAVE_GOOGLE_FACT_CHECK_API_KEY'; apiKey: string }
   | { type: 'GET_SETTINGS' }
+  | { type: 'SIMPLIFY_TEXT'; text: string; level?: RewriteLevel }
+  | { type: 'SUMMARIZE_TEXT'; text: string; level?: RewriteLevel }
   | { type: 'START_SCAN'; tabId?: number }
   | { type: 'GET_EMBEDDED_PANEL_STATE' }
   | { type: 'GET_SCAN_STATUS'; tabId?: number }
