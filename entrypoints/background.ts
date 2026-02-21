@@ -1,6 +1,4 @@
 import { analyzeClaims } from '@/lib/analysis';
-import { simplifySelectionText } from '@/lib/simplify';
-import { summarizeSelectionText } from '@/lib/summarize';
 import {
   clearFindingEvidenceForTab,
   getApiKey,
@@ -1137,38 +1135,6 @@ export default defineBackground(() => {
             hasApiKey: await hasApiKey(),
             hasGoogleFactCheckApiKey: await hasGoogleFactCheckApiKey(),
           });
-          return;
-        }
-
-        case 'SIMPLIFY_TEXT': {
-          const apiKey = await getApiKey();
-          if (!apiKey) {
-            sendResponse({ ok: false, error: 'OpenRouter API key is required.' });
-            return;
-          }
-          const level = message.level === 1 || message.level === 2 || message.level === 3 ? message.level : 2;
-          const simplified = await simplifySelectionText({
-            apiKey,
-            text: message.text,
-            level,
-          });
-          sendResponse({ ok: true, simplified });
-          return;
-        }
-
-        case 'SUMMARIZE_TEXT': {
-          const apiKey = await getApiKey();
-          if (!apiKey) {
-            sendResponse({ ok: false, error: 'OpenRouter API key is required.' });
-            return;
-          }
-          const level = message.level === 1 || message.level === 2 || message.level === 3 ? message.level : 2;
-          const summary = await summarizeSelectionText({
-            apiKey,
-            text: message.text,
-            level,
-          });
-          sendResponse({ ok: true, summary });
           return;
         }
 
